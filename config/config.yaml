@@ -1,0 +1,42 @@
+# Project configuration
+project:
+  name: "cp219-goose-ids"
+  entity: "HPR-cp219" # W&B team name
+
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  train_files:
+    replay: "replay_labelled_train.csv"
+    masquerade: "masquerade_labelled_train.csv"
+    injection: "injection_labelled_train.csv"
+    poisoning: "poisoning_labelled_train.csv"
+  test_files:
+    replay: "replay_labelled_test.csv"
+    masquerade: "masquerade_labelled_test.csv"
+    injection: "injection_labelled_test.csv"
+    poisoning: "poisoning_labelled_test.csv"
+
+preprocessing:
+  group_by_gocbref: true
+  handle_missing: "drop" # or "impute"
+  scaling: "standard" # or "minmax", "robust"
+
+feature_engineering:
+  temporal_features: true
+  statistical_features: true
+  custom_features: true
+
+evaluation:
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1_score
+    - confusion_matrix
+  cross_validation: false
+
+wandb:
+  enabled: true
+  log_frequency: 10
+  save_checkpoints: true
