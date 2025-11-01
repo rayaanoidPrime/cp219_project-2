@@ -1,235 +1,258 @@
 """
-Task 3: Binary Intrusion Detection - Compare multiple unsupervised models
+Task 3 Runner: Binary Intrusion Detection
+Execute binary classification experiments comparing multiple unsupervised models.
+
+Usage:
+    python experiments/run_task3.py
+    python experiments/run_task3.py --config config/config.yaml
+    python experiments/run_task3.py --use-wandb
+    python experiments/run_task3.py --no-wandb
 """
 
 import sys
+import argparse
+import yaml
 from pathlib import Path
+
+# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-import pandas as pd
-from typing import Dict, Any
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-from src.data.loader import load_all_datasets
-from src.data.preprocessor import preprocess_data
-from src.models.isolation_forest import IsolationForestDetector
-from src.models.clustering import GMMDetector, KMeansDetector, DBSCANDetector
-from src.models.one_class_svm import OneClassSVMDetector
-from src.models.autoencoder import AutoencoderDetector
-from src.evaluation.metrics import compute_all_metrics
-from src.evaluation.visualizer import plot_model_comparison, plot_roc_curves
+from src.tasks.task3_binary import run_task3
 from src.utils.wandb_utils import WandbLogger
 
 
-def run_task3(config: Dict[str, Any], logger: WandbLogger = None) -> Dict:
-    """
-    Run Task 3: Binary Intrusion Detection.
+def main():
+    """Main execution function."""
     
-    Args:
-        config: Configuration dictionary
-        logger: WandbLogger instance (optional)
-    
-    Returns:
-        Dictionary with results
-    """
-    print("Loading datasets...")
-    train_data, test_data = load_all_datasets(config)
-    
-    print("Preprocessing data...")
-    X_train, y_train, X_test, y_test = preprocess_data(
-        train_data, test_data, config
+    # Parse arguments
+    parser = argparse.ArgumentParser(
+        description='Run Task 3: Binary Intrusion Detection'
+    )
+    parser.add_argument(
+        '--config',
+        type=str,
+        default='config/config.yaml',
+        help='Path to configuration file (default: config/config.yaml)'
+    )
+    parser.add_argument(
+        '--use-wandb',
+        action='store_true',
+        help='Enable W&B logging (overrides config)'
+    )
+    parser.add_argument(
+        '--no-wandb',
+        action='store_true',
+        help='Disable W&B logging (overrides config)'
+    )
+    parser.add_argument(
+        '--wandb-tags',
+        type=str,
+        default='',
+        help='Comma-separated W&B tags (e.g., "alice,experiment-v1")'
+    )
+    parser.add_argument(
+        '--wandb-name',
+        type=str,
+        default=None,
+        help='Custom W&B run name'
     )
     
-    print(f"Training data shape: {X_train.shape}")
-    print(f"Test data shape: {X_test.shape}")
-    print(f"Attack ratio in test: {y_test.mean():.2%}")
+    args = parser.parse_args()
     
-    # Define models to compare
-    models = {
-        'Isolation Forest': IsolationForestDetector(
-            config=config.get('models', {}).get('isolation_forest', {}),
-            use_wandb=(logger is not None)
-        ),
-        'GMM': GMMDetector(
-            config=config.get('models', {}).get('gmm', {}),
-            use_wandb=(logger is not None)
-        ),
-        'K-Means': KMeansDetector(
-            config=config.get('models', {}).get('kmeans', {}),
-            use_wandb=(logger is not None)
-        ),
-        'DBSCAN': DBSCANDetector(
-            config=config.get('models', {}).get('dbscan', {}),
-            use_wandb=(logger is not None)
-        ),
-        'One-Class SVM': OneClassSVMDetector(
-            config=config.get('models', {}).get('one_class_svm', {}),
-            use_wandb=(logger is not None)
-        )
-    }
+    # Load configuration
+    print(f"Loading configuration from: {args.config}")
+    try:
+        with open(args.config, 'r') as f:
+            config = yaml.safe_load(f)
+    except FileNotFoundError:
+        print(f"Error: Configuration file not found: {args.config}")
+        print("Please create config/config.yaml or specify a valid config file.")
+        sys.exit(1)
+    except yaml.YAMLError as e:
+        print(f"Error parsing configuration file: {e}")
+        sys.exit(1)
     
-    # Add Autoencoder if configured
-    if config.get('models', {}).get('autoencoder', {}).get('enabled', False):
-        models['Autoencoder'] = AutoencoderDetector(
-            config=config.get('models', {}).get('autoencoder', {}),
-            use_wandb=(logger is not None)
-        )
+    # Determine W&B usage
+    if args.no_wandb:
+        use_wandb = False
+    elif args.use_wandb:
+        use_wandb = True
+    else:
+        use_wandb = config.get('wandb', {}).get('enabled', False)
     
-    results = []
-    all_predictions = {}
+    print("\n" + "="*70)
+    print("CP219 PROJECT 2 - TASK 3")
+    print("Binary Intrusion Detection (Normal vs Attack)")
+    print("="*70)
+    print(f"Configuration: {args.config}")
+    print(f"W&B Logging: {'Enabled' if use_wandb else 'Disabled'}")
     
-    # Train and evaluate each model
-    for model_name, model in models.items():
-        print(f"\n{'='*60}")
-        print(f"Training and evaluating: {model_name}")
-        print(f"{'='*60}")
-        
+    # Verify data directory
+    data_dir = Path(config['data']['raw_dir'])
+    if not data_dir.exists():
+        print(f"\nError: Data directory not found: {data_dir}")
+        print("Please ensure your data files are in the correct location.")
+        sys.exit(1)
+    
+    # Check for required data files
+    required_files = []
+    for attack_type in ['replay', 'masquerade', 'injection', 'poisoning']:
+        train_file = config['data']['train_files'][attack_type]
+        test_file = config['data']['test_files'][attack_type]
+        required_files.append(data_dir / train_file)
+        required_files.append(data_dir / test_file)
+    
+    missing_files = [f for f in required_files if not f.exists()]
+    if missing_files:
+        print("\nError: Missing data files:")
+        for f in missing_files:
+            print(f"  - {f}")
+        print("\nPlease add all required training and test data files.")
+        sys.exit(1)
+    
+    print(f"Data directory: {data_dir}")
+    print(f"Output directory: outputs/")
+    print()
+    
+    # Initialize logger if W&B is enabled
+    logger = None
+    if use_wandb:
         try:
-            # Train model
-            print(f"Training {model_name}...")
-            model.fit(X_train)
+            # Parse tags
+            tags = ['task3', 'binary-detection']
+            if args.wandb_tags:
+                tags.extend([t.strip() for t in args.wandb_tags.split(',')])
             
-            # Evaluate on test set
-            print(f"Evaluating {model_name}...")
-            metrics = model.evaluate(X_test, y_test, prefix="test")
+            # Initialize W&B
+            print("Initializing Weights & Biases...")
+            logger = WandbLogger(
+                project_name=config['project']['name'],
+                entity=config['project'].get('entity'),
+                config=config,
+                job_type='task3_binary_detection',
+                tags=tags,
+                group='task3_experiments'
+            )
             
-            # Store predictions for ensemble later
-            all_predictions[model_name] = model.predict(X_test)
+            # Set custom run name if provided
+            if args.wandb_name:
+                import wandb
+                wandb.run.name = args.wandb_name
             
-            # Compute additional metrics
-            memory_mb = model.get_memory_footprint()
-            
-            result = {
-                'Model': model_name,
-                'Accuracy': metrics['test/accuracy'],
-                'Precision': metrics['test/precision'],
-                'Recall': metrics['test/recall'],
-                'F1-Score': metrics['test/f1_score'],
-                'Train Time (s)': model.train_time,
-                'Inference Time (ms)': model.inference_time * 1000,
-                'Memory (MB)': memory_mb
-            }
-            results.append(result)
-            
-            # Print results
-            print(f"\n{model_name} Results:")
-            for key, value in result.items():
-                if key != 'Model':
-                    print(f"  {key}: {value:.4f}")
-            
-            # Log to wandb
-            if logger is not None:
-                logger.log_metrics({
-                    f"binary/{model_name}/accuracy": metrics['test/accuracy'],
-                    f"binary/{model_name}/precision": metrics['test/precision'],
-                    f"binary/{model_name}/recall": metrics['test/recall'],
-                    f"binary/{model_name}/f1_score": metrics['test/f1_score'],
-                    f"binary/{model_name}/train_time": model.train_time,
-                    f"binary/{model_name}/inference_time_ms": model.inference_time * 1000,
-                    f"binary/{model_name}/memory_mb": memory_mb
-                })
-            
-            # Save model
-            model_path = Path('outputs/models') / f'{model_name.lower().replace(" ", "_")}_binary.pkl'
-            model.save(str(model_path))
+            print(f"W&B Run: {logger.run.name}")
+            print(f"W&B URL: {logger.run.url}")
+            print()
             
         except Exception as e:
-            print(f"Error training {model_name}: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            continue
+            print(f"Warning: Failed to initialize W&B: {e}")
+            print("Continuing without W&B logging...")
+            logger = None
     
-    # Create results dataframe
-    results_df = pd.DataFrame(results)
-    results_df = results_df.sort_values('F1-Score', ascending=False)
+    # Run Task 3
+    try:
+        print("Starting Task 3 analysis...")
+        print("This may take several minutes depending on dataset size...")
+        print("-" * 70)
+        
+        results = run_task3(config, logger)
+        
+        print("\n" + "="*70)
+        print("TASK 3 COMPLETED SUCCESSFULLY!")
+        print("="*70)
+        
+        # Print summary
+        print("\nSummary:")
+        print(f"  Status: {results.get('status', 'completed')}")
+        print(f"  Best Model: {results.get('best_model', 'N/A')}")
+        print(f"  Best F1-Score: {results.get('best_f1_score', 0):.4f}")
+        print(f"  Best Accuracy: {results.get('best_accuracy', 0):.4f}")
+        
+        # Model comparison
+        if 'results_table' in results:
+            results_table = results['results_table']
+            print("\n  Top 3 Models by F1-Score:")
+            for idx, row in results_table.head(3).iterrows():
+                print(f"    {idx+1}. {row['Model']}: F1={row['F1-Score']:.4f}, "
+                      f"Inference={row['Inference Time (ms)']:.2f}ms")
+        
+        # Output locations
+        print("\n  Output Locations:")
+        print("    Figures: outputs/figures/task3/")
+        print("    Tables:  outputs/tables/task3/")
+        print("    Models:  outputs/models/task3/")
+        
+        # List generated files
+        fig_dir = Path('outputs/figures/task3')
+        table_dir = Path('outputs/tables/task3')
+        model_dir = Path('outputs/models/task3')
+        
+        if fig_dir.exists():
+            figures = list(fig_dir.glob('*.png'))
+            if figures:
+                print(f"\n  Generated Figures ({len(figures)}):")
+                for fig in sorted(figures):
+                    print(f"    - {fig.name}")
+        
+        if table_dir.exists():
+            tables = list(table_dir.glob('*.csv'))
+            if tables:
+                print(f"\n  Generated Tables ({len(tables)}):")
+                for table in sorted(tables):
+                    print(f"    - {table.name}")
+        
+        if model_dir.exists():
+            models = list(model_dir.glob('*.pkl'))
+            if models:
+                print(f"\n  Saved Models ({len(models)}):")
+                for model in sorted(models):
+                    print(f"    - {model.name}")
+        
+        # W&B info
+        if logger:
+            print(f"\n  W&B Dashboard: {logger.run.url}")
+        
+        print("\n" + "="*70)
+        
+        # Recommendations
+        print("\nRECOMMENDATIONS:")
+        print("-" * 70)
+        print(f"For real-time substation deployment (<4ms latency requirement):")
+        print(f"  • Best overall: {results.get('best_model', 'N/A')}")
+        print(f"  • Consider trade-offs between accuracy and inference speed")
+        print(f"  • Review the performance vs efficiency plot for deployment decision")
+        
+    except Exception as e:
+        print("\n" + "="*70)
+        print("ERROR DURING TASK 3 EXECUTION")
+        print("="*70)
+        print(f"\nError: {str(e)}")
+        
+        import traceback
+        print("\nFull traceback:")
+        traceback.print_exc()
+        
+        if logger:
+            logger.finish()
+        
+        sys.exit(1)
     
-    print(f"\n{'='*60}")
-    print("MODEL COMPARISON SUMMARY")
-    print(f"{'='*60}")
-    print(results_df.to_string(index=False))
+    # Finish W&B run
+    if logger:
+        print("\nFinalizing W&B run...")
+        logger.finish()
+        print("W&B run finished.")
     
-    # Save results table
-    table_path = Path('outputs/tables') / 'task3_model_comparison.csv'
-    results_df.to_csv(table_path, index=False)
-    print(f"\nResults saved to: {table_path}")
+    print("\n✓ Task 3 completed successfully!")
+    print("\nNext steps:")
+    print("  1. Review model comparison in outputs/tables/task3/model_comparison.csv")
+    print("  2. Examine visualizations in outputs/figures/task3/")
+    print("  3. Check saved models in outputs/models/task3/")
+    print("  4. Proceed to Task 4 (Multi-class Attack Detection)")
+    if logger:
+        print(f"  5. View detailed results at: {logger.run.url}")
     
-    # Log to wandb
-    if logger is not None:
-        logger.log_dataframe(results_df, "task3_model_comparison")
-    
-    # Create comparison visualizations
-    print("\nGenerating comparison plots...")
-    
-    # 1. Performance metrics comparison
-    fig = plot_model_comparison(results_df)
-    fig_path = Path('outputs/figures') / 'task3_model_comparison.png'
-    fig.savefig(fig_path, dpi=300, bbox_inches='tight')
-    print(f"Saved: {fig_path}")
-    
-    if logger is not None:
-        logger.log_figure(fig, "task3_model_comparison")
-    plt.close(fig)
-    
-    # 2. Trade-off analysis (F1 vs Inference Time)
-    fig, ax = plt.subplots(figsize=(10, 6))
-    scatter = ax.scatter(
-        results_df['Inference Time (ms)'],
-        results_df['F1-Score'],
-        s=results_df['Memory (MB)'] * 10,
-        alpha=0.6,
-        c=range(len(results_df)),
-        cmap='viridis'
-    )
-    
-    for idx, row in results_df.iterrows():
-        ax.annotate(
-            row['Model'],
-            (row['Inference Time (ms)'], row['F1-Score']),
-            xytext=(5, 5),
-            textcoords='offset points',
-            fontsize=9
-        )
-    
-    ax.set_xlabel('Inference Time per Sample (ms)')
-    ax.set_ylabel('F1-Score')
-    ax.set_title('Model Performance vs Inference Time\n(bubble size = memory footprint)')
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    
-    tradeoff_path = Path('outputs/figures') / 'task3_performance_tradeoff.png'
-    fig.savefig(tradeoff_path, dpi=300, bbox_inches='tight')
-    print(f"Saved: {tradeoff_path}")
-    
-    if logger is not None:
-        logger.log_figure(fig, "task3_performance_tradeoff")
-    plt.close(fig)
-    
-    # 3. Best model analysis
-    best_model_name = results_df.iloc[0]['Model']
-    print(f"\n{'='*60}")
-    print(f"BEST MODEL: {best_model_name}")
-    print(f"F1-Score: {results_df.iloc[0]['F1-Score']:.4f}")
-    print(f"{'='*60}")
-    
-    # Return summary
-    return {
-        'best_model': best_model_name,
-        'best_f1_score': float(results_df.iloc[0]['F1-Score']),
-        'best_accuracy': float(results_df.iloc[0]['Accuracy']),
-        'results_table': results_df,
-        'all_predictions': all_predictions
-    }
+    return 0
 
 
 if __name__ == '__main__':
-    import yaml
-    
-    # Load config
-    with open('config/config.yaml', 'r') as f:
-        config = yaml.safe_load(f)
-    
-    # Run task
-    results = run_task3(config, logger=None)
-    print("\nTask 3 completed!")
+    sys.exit(main())

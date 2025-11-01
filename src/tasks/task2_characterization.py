@@ -172,9 +172,31 @@ class AttackCharacterizer:
         numeric_cols = all_data.select_dtypes(include=[np.number]).columns
         numeric_cols = [c for c in numeric_cols if c not in ['attack']]
         
-        # Clean data
+        # Clean data - more aggressive cleaning
         data_clean = all_data[numeric_cols].replace([np.inf, -np.inf], np.nan)
-        data_clean = data_clean.fillna(data_clean.median())
+        
+        # Drop columns with too many NaN values (>50%)
+        threshold = len(data_clean) * 0.5
+        data_clean = data_clean.dropna(axis=1, thresh=threshold)
+        
+        # Fill remaining NaN values with median
+        for col in data_clean.columns:
+            if data_clean[col].isna().any():
+                median_val = data_clean[col].median()
+                if pd.isna(median_val):
+                    # If median is still NaN, use 0
+                    data_clean[col].fillna(0, inplace=True)
+                else:
+                    data_clean[col].fillna(median_val, inplace=True)
+        
+        # Drop columns with zero variance
+        data_clean = data_clean.loc[:, data_clean.var() > 0]
+        
+        # Final check for any remaining NaN or inf values
+        data_clean = data_clean.replace([np.inf, -np.inf], np.nan)
+        data_clean = data_clean.dropna(axis=1)
+        
+        print(f"\nFeatures after cleaning: {len(data_clean.columns)}")
         
         # Compute variance
         variances = data_clean.var().sort_values(ascending=False)
@@ -183,20 +205,30 @@ class AttackCharacterizer:
         print(variances.head(15).to_string())
         
         # Method 2: PCA-based importance
-        scaler = StandardScaler()
-        data_scaled = scaler.fit_transform(data_clean)
-        
-        pca = PCA(n_components=min(10, data_scaled.shape[1]))
-        pca.fit(data_scaled)
-        
-        # Feature importance from first PC
-        pc1_importance = pd.Series(
-            np.abs(pca.components_[0]),
-            index=numeric_cols
-        ).sort_values(ascending=False)
-        
-        print("\nTop 15 features by PCA (PC1) importance:")
-        print(pc1_importance.head(15).to_string())
+        try:
+            scaler = StandardScaler()
+            data_scaled = scaler.fit_transform(data_clean)
+            
+            # Check for NaN after scaling
+            if np.isnan(data_scaled).any():
+                print("\nWarning: NaN values found after scaling. Replacing with 0.")
+                data_scaled = np.nan_to_num(data_scaled, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            pca = PCA(n_components=min(10, data_scaled.shape[1]))
+            pca.fit(data_scaled)
+            
+            # Feature importance from first PC
+            pc1_importance = pd.Series(
+                np.abs(pca.components_[0]),
+                index=data_clean.columns
+            ).sort_values(ascending=False)
+            
+            print("\nTop 15 features by PCA (PC1) importance:")
+            print(pc1_importance.head(15).to_string())
+        except Exception as e:
+            print(f"\nWarning: PCA analysis failed: {e}")
+            print("Skipping PCA-based importance analysis.")
+            pc1_importance = pd.Series(dtype=float)
         
         # Create visualization
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
@@ -210,14 +242,19 @@ class AttackCharacterizer:
         axes[0].set_title('Top 15 Features by Variance', fontweight='bold')
         axes[0].invert_yaxis()
         
-        # PCA-based
-        top_pca = pc1_importance.head(15)
-        axes[1].barh(range(len(top_pca)), top_pca.values)
-        axes[1].set_yticks(range(len(top_pca)))
-        axes[1].set_yticklabels(top_pca.index, fontsize=9)
-        axes[1].set_xlabel('|PC1 Loading|')
-        axes[1].set_title('Top 15 Features by PCA Importance', fontweight='bold')
-        axes[1].invert_yaxis()
+        # PCA-based (only if PCA succeeded)
+        if not pc1_importance.empty:
+            top_pca = pc1_importance.head(15)
+            axes[1].barh(range(len(top_pca)), top_pca.values)
+            axes[1].set_yticks(range(len(top_pca)))
+            axes[1].set_yticklabels(top_pca.index, fontsize=9)
+            axes[1].set_xlabel('|PC1 Loading|')
+            axes[1].set_title('Top 15 Features by PCA Importance', fontweight='bold')
+            axes[1].invert_yaxis()
+        else:
+            axes[1].text(0.5, 0.5, 'PCA analysis not available', 
+                        ha='center', va='center', transform=axes[1].transAxes)
+            axes[1].set_title('PCA Importance (Failed)', fontweight='bold')
         
         plt.tight_layout()
         fig_path = self.fig_dir / 'feature_importance_unsupervised.png'
@@ -249,16 +286,39 @@ class AttackCharacterizer:
         numeric_cols = all_data.select_dtypes(include=[np.number]).columns
         numeric_cols = [c for c in numeric_cols if c not in ['attack']]
         
-        # Clean data
+        # Clean data - more aggressive cleaning
         X = all_data[numeric_cols].replace([np.inf, -np.inf], np.nan)
-        X = X.fillna(X.median())
+        
+        # Drop columns with too many NaN values (>50%)
+        threshold = len(X) * 0.5
+        X = X.dropna(axis=1, thresh=threshold)
+        
+        # Fill remaining NaN values
+        for col in X.columns:
+            if X[col].isna().any():
+                median_val = X[col].median()
+                if pd.isna(median_val):
+                    X[col].fillna(0, inplace=True)
+                else:
+                    X[col].fillna(median_val, inplace=True)
+        
+        # Drop columns with zero variance
+        X = X.loc[:, X.var() > 0]
+        
+        # Final check
+        X = X.replace([np.inf, -np.inf], np.nan)
+        X = X.dropna(axis=1)
+        
         y = all_data['attack']
         
+        print(f"\nFeatures for RF training: {len(X.columns)}")
+        print(f"Samples: {len(X)}")
+        
         # Random Forest for feature importance
-        rf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+        rf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1, max_depth=10)
         rf.fit(X, y)
         
-        importance = pd.Series(rf.feature_importances_, index=numeric_cols)
+        importance = pd.Series(rf.feature_importances_, index=X.columns)
         importance = importance.sort_values(ascending=False)
         
         print("\nTop 15 features by Random Forest importance:")
@@ -431,13 +491,37 @@ class AttackCharacterizer:
         numeric_cols = all_data.select_dtypes(include=[np.number]).columns
         numeric_cols = [c for c in numeric_cols if c not in ['attack']]
         
-        # Clean data
+        # Clean data - more aggressive cleaning
         X = all_data[numeric_cols].replace([np.inf, -np.inf], np.nan)
-        X = X.fillna(X.median())
+        
+        # Drop columns with too many NaN values (>50%)
+        threshold = len(X) * 0.5
+        X = X.dropna(axis=1, thresh=threshold)
+        
+        # Fill remaining NaN values
+        for col in X.columns:
+            if X[col].isna().any():
+                median_val = X[col].median()
+                if pd.isna(median_val):
+                    X[col].fillna(0, inplace=True)
+                else:
+                    X[col].fillna(median_val, inplace=True)
+        
+        # Drop columns with zero variance
+        X = X.loc[:, X.var() > 0]
+        
+        # Final check
+        X = X.replace([np.inf, -np.inf], np.nan)
+        X = X.dropna(axis=1)
+        
+        print(f"\nFeatures for difficulty analysis: {len(X.columns)}")
         
         # Standardize
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
+        
+        # Replace any remaining NaN/inf after scaling
+        X_scaled = np.nan_to_num(X_scaled, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Compute separability metrics per attack type
         difficulty = []
