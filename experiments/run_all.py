@@ -21,8 +21,8 @@ from src.utils.wandb_utils import WandbLogger
 from src.tasks.task1_eda import run_task1
 from src.tasks.task2_characterization import run_task2
 from src.tasks.task3_binary import run_task3
-from src.tasks.task4_multiclass import run_task4
-from src.tasks.task5_advanced import run_task5
+# from src.tasks.task4_multiclass import run_task4
+# from src.tasks.task5_advanced import run_task5
 
 
 def load_config(config_path: str) -> dict:
