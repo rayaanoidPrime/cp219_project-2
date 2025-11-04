@@ -11,13 +11,14 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 from scipy import stats
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.manifold import TSNE
 import warnings
 warnings.filterwarnings('ignore')
+from sklearn.metrics import confusion_matrix, classification_report
 
 from src.utils.wandb_utils import WandbLogger
 
@@ -58,7 +59,23 @@ class GOOSEDataExplorer:
         
         print(f"Training data shape: {train_data.shape}")
         print(f"Test data shape: {test_data.shape}")
-        
+        # Drop irrelevant columns
+        keep_columns = ['gocbRef',
+                        'timeAllowedtoLive',
+                        'Time',
+                        't',
+                        'stNum',
+                        'sqNum',
+                        'Length',
+                        'Boolean',
+                        'bit-string',
+                        'attack',
+                        'attack_type'
+                        ]
+        train_data = train_data.filter(items=keep_columns)
+        test_data = test_data.filter(items=keep_columns)
+        print(f"Training data shape after dropping irrelevant columns: {train_data.shape}")
+        print(f"Test data shape after dropping irrelevant columns: {test_data.shape}")
         return train_data, test_data
     
     def basic_statistics(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -400,7 +417,45 @@ class GOOSEDataExplorer:
             logger.log_figure(fig, "task1_tsne_by_attack_type")
         
         plt.close()
-    
+
+    def detect_goose_events(self, df: pd.DataFrame, logger: Optional[WandbLogger]) -> pd.DataFrame:
+        df = df.sort_values(['gocbRef', 'Time']).copy()
+        events = []
+        for gocb, group in df.groupby('gocbRef'):
+            group = group.reset_index(drop=True)
+            group['ΔstNum'] = group['stNum'].diff()
+            group['ΔsqNum'] = group['sqNum'].diff()
+            group['ΔTime']  = group['Time'].diff()
+            # Rule 1: stNum change but sqNum not reset
+            rule1_violation = (group['ΔstNum'] > 0) & (group['sqNum'] != 0)
+            # Rule 2: sqNum jump or reset without stNum change
+            rule2_violation = (group['ΔstNum'] == 0) & (group['ΔsqNum'] > 1)
+
+            # Rule 3: timeAllowedtoLive unreasonable
+            rule3_violation = (group['timeAllowedtoLive'] < 1) | (group['timeAllowedtoLive'] > 10000)
+            # Rule 4: inter-frame interval > timeAllowedtoLive
+            rule4_violation = group['ΔTime'] > group['timeAllowedtoLive']
+
+            group['rule1_v'] = rule1_violation
+            group['rule2_v'] = rule2_violation
+            group['rule3_v'] = rule3_violation
+            group['rule4_v'] = rule4_violation
+
+            events.append(group)
+
+        df_events = pd.concat(events, ignore_index=True)
+
+    # Save and summarize
+        out_path = Path('outputs/tables/task1_goose_event_flags.csv')
+        df_events.to_csv(out_path, index=False)
+        print(f"Saved event-flagged data: {out_path}")
+
+        summary = (df_events[['rule1_v','rule2_v','rule3_v','rule4_v']]
+               .sum().rename('violations').to_frame())
+        print("\nGOOSE rule violation summary:\n", summary)
+
+        return df_events
+
     def analyze_goose_rules(self, df: pd.DataFrame, logger: WandbLogger = None):
         """Analyze adherence to GOOSE protocol rules."""
         print("\n" + "="*70)
@@ -492,10 +547,23 @@ def run_task1(config: Dict[str, Any], logger: WandbLogger = None) -> Dict:
     explorer.plot_correlation_analysis(all_data, logger)
     explorer.plot_dimensionality_reduction(all_data, logger)
     explorer.analyze_goose_rules(all_data, logger)
+    df_events = explorer.detect_goose_events(all_data, logger)
     
     print("\n✓ Task 1 completed!")
     print(f"All figures saved to: {explorer.output_dir.absolute()}")
-    
+    # Compare with actual attack label
+    for rule in ['rule1_v', 'rule2_v', 'rule3_v', 'rule4_v']:
+        corr = df_events[rule].astype(int).corr(df_events['attack'])
+        print(f"Correlation of {rule} violation with attack label: {corr:.3f}")
+        # Or confusion-style table
+        pd.crosstab(df_events['attack'], df_events[['rule1_v','rule2_v','rule3_v','rule4_v']].any(axis=1),
+                    rownames=['Label'], colnames=['Any rule violated'])
+    df_events["any_rule_v"] = df_events[["rule1_v","rule2_v","rule3_v","rule4_v"]].any(axis=1)
+    df_events["predicted_attack"] = df_events["any_rule_v"].astype(int)
+
+    print(confusion_matrix(df_events["attack"], df_events["predicted_attack"]))
+    print(classification_report(df_events["attack"], df_events["predicted_attack"]))
+
     return {
         'total_samples': len(all_data),
         'attack_ratio': all_data['attack'].mean(),
