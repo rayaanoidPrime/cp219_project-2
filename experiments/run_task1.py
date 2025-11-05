@@ -62,7 +62,7 @@ def parse_args():
 
 
 def main():
-    """Main execution function."""
+    """Main execution functi"""
     args = parse_args()
     
     # Load configuration

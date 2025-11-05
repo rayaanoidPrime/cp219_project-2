@@ -26,10 +26,8 @@ length_delta
 event_rate_spike
 st_change
 t_change
-status_bit_change
 sq_reset_expected
 sq_reset_violation
-status_change_missing_on_event
 ttl_half
 heartbeat_interval_error
 heartbeat_within_tol
