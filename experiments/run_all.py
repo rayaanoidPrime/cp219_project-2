@@ -20,9 +20,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.utils.wandb_utils import WandbLogger
 from src.tasks.task1_eda import run_task1
 from src.tasks.task2_characterization import run_task2
-from src.tasks.task3_binary import run_task3
-from src.tasks.task4_multiclass import run_task4
-from src.tasks.task5_advanced import run_task5
+from src.tasks.task2_core_vs_engg import run_task2_workflow
+# from src.tasks.task3_binary import run_task3
+# from src.tasks.task4_multiclass import run_task4
+# from src.tasks.task5_advanced import run_task5
 
 
 def load_config(config_path: str) -> dict:
@@ -54,9 +55,9 @@ def run_all_tasks(config: dict, tasks: list, use_wandb: bool = True):
     task_functions = {
         'task1': ('Exploratory Data Analysis', run_task1),
         'task2': ('Feature & Attack Characterization', run_task2),
-        'task3': ('Binary Intrusion Detection', run_task3),
-        'task4': ('Multi-Class Attack Detection', run_task4),
-        'task5': ('Advanced Analyses (Bonus)', run_task5)
+        # 'task3': ('Binary Intrusion Detection', run_task3),
+        # 'task4': ('Multi-Class Attack Detection', run_task4),
+        # 'task5': ('Advanced Analyses (Bonus)', run_task5)
     }
     
     results = {}
