@@ -11,51 +11,22 @@ from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
 
+# Import shared preprocessing utilities
+from preprocessing import (
+    CORE_FIELDS,
+    ALLOWED_FIELDS,
+    preprocess_dataframe,
+    standardize_schema,
+    engineer_features,
+    get_numeric_features,
+    load_and_preprocess
+)
+
 
 # ==============================================================
 # Task 2: Feature & Attack Characterization (GOOSE-only fields)
 # TWO ANALYSIS MODES: CORE-ONLY vs. FULL (CORE + ALLOWED + ENGINEERED)
 # ==============================================================
-
-CORE_FIELDS: List[str] = [
-    "gocbRef",
-    "timeAllowedtoLive",
-    "Time",
-    "t",
-    "stNum",
-    "sqNum",
-    "Length",
-    "boolean",
-    "bit-string",
-    "attack",
-]
-
-# ---------- Allowed fields ----------
-ALLOWED_FIELDS: List[str] = [
-    # Core 
-    "gocbRef",
-    "timeAllowedtoLive",
-    "Time",
-    "t",
-    "stNum",
-    "sqNum",
-    "Length",
-    "boolean",
-    "bit-string",
-    "attack",
-
-    # Message timing intervals
-    "Epoch Time",
-    "Arrival Time",
-    "Time delta from previous captured frame",
-    "Time delta from previous displayed frame",
-    "Time since reference or first frame",
-    "Time shift for this packet",
-
-    # Rate-based statistics
-    "Frame length on the wire",
-    "Frame length stored into the capture file",
-]
 
 _EPS = 1e-6
 
@@ -92,64 +63,6 @@ class AttackCharacterizer:
             print("Using CORE + ALLOWED + ENGINEERED features")
         print(f"{'='*70}\n")
 
-
-    def _preprocess_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Apply mandatory preprocessing steps:
-        1. Split boolean column into boolean_1, boolean_2, boolean_3
-        2. Convert bitstring to numeric
-        3. Drop attack column for feature calculations (keep for data understanding)
-        """
-        df = df.copy()
-        
-        # Step 1: Boolean column transformation
-        if 'boolean' in df.columns:
-            def parse_boolean_values(val):
-                """Parse comma-separated boolean values or single boolean."""
-                if pd.isna(val) or val == '':
-                    return [np.nan, np.nan, np.nan]
-                
-                # Convert to string and handle case insensitivity
-                val_str = str(val).strip().lower()
-                
-                # Split by comma if present
-                parts = [p.strip() for p in val_str.split(',')]
-                
-                # Map to numeric (1 for true, 0 for false, nan for empty/invalid)
-                def to_numeric(s):
-                    if s in ['true', '1', 'yes', 'y', 'on']:
-                        return 1.0
-                    elif s in ['false', '0', 'no', 'n', 'off']:
-                        return 0.0
-                    else:
-                        return np.nan
-                
-                # Convert each part
-                result = [to_numeric(p) if p else np.nan for p in parts]
-                
-                # Pad to 3 values
-                while len(result) < 3:
-                    result.append(np.nan)
-                
-                return result[:3]  # Take only first 3 if more exist
-            
-            # Apply parsing
-            boolean_split = df['boolean'].apply(parse_boolean_values)
-            df['boolean_1'] = boolean_split.apply(lambda x: x[0])
-            df['boolean_2'] = boolean_split.apply(lambda x: x[1])
-            df['boolean_3'] = boolean_split.apply(lambda x: x[2])
-            
-            # Drop original boolean column
-            df.drop(columns=['boolean'], inplace=True)
-            print("  ✓ Split boolean column into boolean_1, boolean_2, boolean_3")
-        
-        # Step 2: Convert bitstring to numeric (if not already done)
-        if 'bit-string' in df.columns:
-            # Convert to numeric, coercing any non-numeric values
-            df['bitstring_numeric'] = pd.to_numeric(df['bit-string'], errors='coerce')
-            print(f"  ✓ Ensured bit-string is numeric (dtype: {df['bitstring_numeric'].dtype})")
-        
-        return df
     # ----------------------- Data Loading -----------------------
 
     def load_data(self):
@@ -161,24 +74,14 @@ class AttackCharacterizer:
 
         for attack in attack_types:
             train_file = self.config['data']['train_files'][attack]
-            df = pd.read_csv(data_dir / train_file)
-
-            # Select fields based on mode
-            if self.mode == 'core':
-                keep = [c for c in CORE_FIELDS if c in df.columns]
-            else:  # full mode
-                keep = [c for c in ALLOWED_FIELDS if c in df.columns]
+            file_path = data_dir / train_file
             
-            df = df[keep].copy()
-            # Apply preprocessing before standardizing schema
-            df = self._preprocess_dataframe(df)
+            # Use shared preprocessing function
+            df = load_and_preprocess(str(file_path), mode=self.mode)
 
             if 'attack' not in df.columns:
                 raise ValueError(f"'attack' column missing in {train_file}.")
             df['attack_type'] = attack
-
-            # Standardize schema (types + timestamps)
-            df = self._standardize_schema(df)
 
             self.train_data[attack] = df
             print(f"  {attack}: {len(df)} samples, {len(df.columns)} columns")
@@ -190,299 +93,11 @@ class AttackCharacterizer:
         if self.logger is not None:
             self.logger.log_dataframe(used_fields_df, f"task2_{self.mode}/used_fields")
 
-    # ----------------------- Schema Utils -----------------------
-
-    def _standardize_schema(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Cast types, normalize times, and add base_time for engineering."""
-        df = df.copy()
-
-        numeric_like = [
-            "Epoch Time", "Arrival Time", "Length", "Frame length on the wire",
-            "Frame length stored into the capture file", "timeAllowedtoLive",
-            "stNum", "sqNum", "confRev", "numDatSetEntries",
-            "Time delta from previous captured frame",
-            "Time delta from previous displayed frame",
-            "Time since reference or first frame",
-            "Time shift for this packet",
-            "attack",
-        ]
-        for col in numeric_like:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        # boolean may be strings: map to 0/1
-        for bool_col in ['boolean_1', 'boolean_2', 'boolean_3']:
-            if bool_col in df.columns:
-                df[bool_col] = pd.to_numeric(df[bool_col], errors='coerce')
-
-        if 'bitstring_numeric' in df.columns:
-            df['bitstring_numeric'] = pd.to_numeric(df['bitstring_numeric'], errors='coerce')
-            
-        if 'bit-string' in df.columns:
-            def _popcount_from_hex(x):
-                if pd.isna(x): return np.nan
-                s = str(x).strip().lower().replace('0x', '')
-                try:
-                    return bin(int(s, 16))[2:].count('1')
-                except Exception:
-                    return np.nan
-        
-            df['bitstring_bitcount'] = df['bit-string'].apply(_popcount_from_hex).astype('float64')
-
-        # Create base_time seconds from best available: Epoch, Arrival, Time, t
-        def _parse_to_epoch(col: pd.Series) -> pd.Series:
-            if col.dtype == object:
-                dt = pd.to_datetime(col, errors='coerce', utc=True)
-                return dt.astype('int64') / 1e9  # ns -> s
-            return pd.to_numeric(col, errors='coerce')
-
-        epoch = df['Epoch Time'] if 'Epoch Time' in df.columns else pd.Series([np.nan] * len(df))
-        arriv = df['Arrival Time'] if 'Arrival Time' in df.columns else pd.Series([np.nan] * len(df))
-        time_parsed = _parse_to_epoch(df['Time']) if 'Time' in df.columns else pd.Series([np.nan] * len(df))
-        t_parsed = _parse_to_epoch(df['t']) if 't' in df.columns else pd.Series([np.nan] * len(df))
-
-        base_time = epoch.copy().fillna(arriv).fillna(time_parsed).fillna(t_parsed)
-        df['base_time'] = pd.to_numeric(base_time, errors='coerce')
-
-        if 'gocbRef' in df.columns:
-            df['gocbRef'] = df['gocbRef'].astype(str)
-
-        for c in df.columns:
-            if pd.api.types.is_numeric_dtype(df[c]):
-                df[c].replace([np.inf, -np.inf], np.nan, inplace=True)
-
-        return df
-
-    # --------------------- Feature Engineering ---------------------
-
-    def engineer_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Engineered features using ONLY allowed/raw fields.
-        Only runs in 'full' mode. In 'core' mode, returns df as-is.
-        """
-        if self.mode == 'core':
-            return df.copy()
-        
-        df = df.copy()
-
-        # Sort within device stream
-        sort_key = 'base_time' if 'base_time' in df.columns else None
-        if 'gocbRef' in df.columns and sort_key is not None:
-            df = df.sort_values(['gocbRef', sort_key])
-
-        # ----- Inter-arrival timing -----
-        if sort_key is not None and 'gocbRef' in df.columns:
-            df['inter_arrival'] = df.groupby('gocbRef')[sort_key].diff()
-        else:
-            if 'Time delta from previous captured frame' in df.columns:
-                df['inter_arrival'] = df['Time delta from previous captured frame']
-            elif 'Time delta from previous displayed frame' in df.columns:
-                df['inter_arrival'] = df['Time delta from previous displayed frame']
-            else:
-                df['inter_arrival'] = np.nan
-
-        # Jitter (rolling std of inter-arrival)
-        if 'gocbRef' in df.columns and 'inter_arrival' in df.columns:
-            df['jitter_rolling_std'] = (
-                df.groupby('gocbRef')['inter_arrival']
-                  .rolling(window=10, min_periods=3)
-                  .std()
-                  .reset_index(level=0, drop=True)
-            )
-
-        # ----- Rates -----
-        length_col = 'Frame length on the wire' if 'Frame length on the wire' in df.columns else 'Length'
-        if length_col in df.columns and 'inter_arrival' in df.columns:
-            df['msg_rate'] = 1.0 / (df['inter_arrival'].astype(float) + _EPS)
-            df['byte_rate'] = df[length_col].astype(float) / (df['inter_arrival'].astype(float) + _EPS)
-
-        # ----- TTL consistency -----
-        if 'timeAllowedtoLive' in df.columns and 'inter_arrival' in df.columns:
-            df['ttl_violation'] = (df['inter_arrival'] > (df['timeAllowedtoLive'] / 1000.0)).astype(float)
-            df['ttl_margin'] = (df['timeAllowedtoLive'] / 1000.0) - df['inter_arrival']
-
-        # ----- Sequence transitions -----
-        if 'gocbRef' in df.columns and 'sqNum' in df.columns:
-            df['sqNum_delta'] = df.groupby('gocbRef')['sqNum'].diff()
-            df['sqNum_jump'] = ((df['sqNum_delta'] != 1) & df['sqNum_delta'].notna()).astype(float)
-
-        if 'gocbRef' in df.columns and 'stNum' in df.columns:
-            df['stNum_delta'] = df.groupby('gocbRef')['stNum'].diff()
-            df['stNum_change'] = ((df['stNum_delta'] != 0) & df['stNum_delta'].notna()).astype(float)
-
-        if all(c in df.columns for c in ['stNum_change', 'sqNum']):
-            df['sq_reset_on_st_change'] = ((df['stNum_change'] == 1.0) & (df['sqNum'].isin({0, 1}))).astype(float)
-
-        # ----- Length dynamics -----
-        if 'gocbRef' in df.columns and length_col in df.columns:
-            df['length_delta'] = df.groupby('gocbRef')[length_col].diff()
-
-        # ----- Optional composite ratios -----
-        if 'msg_rate' in df.columns and 'stNum_change' in df.columns:
-            df['event_rate_spike'] = df['msg_rate'] * df['stNum_change']
-
-        if 'bitstring_bitcount' in df.columns and length_col in df.columns:
-            df['bit_density'] = df['bitstring_bitcount'] / (df[length_col].astype(float) * 8.0 + _EPS)
-
-        # ======== ENGINEERED FEATURES FROM GOOSE RULES ========
-
-        _RESET_SET = {0, 1}
-
-        # 1) Basic change flags / timestamp change
-        if 'stNum_change' in df.columns:
-            df['st_change'] = df['stNum_change'].astype(float)
-        else:
-            df['st_change'] = np.nan
-
-        if 't' in df.columns and 'gocbRef' in df.columns:
-            df['t_raw'] = df['t'].astype(str)
-            df['t_change'] = (df.groupby('gocbRef')['t_raw'].shift() != df['t_raw']).astype(float)
-            df.loc[df.groupby('gocbRef').head(1).index, 't_change'] = np.nan
-            df.drop(columns=['t_raw'], inplace=True, errors='ignore')
-        else:
-            df['t_change'] = np.nan
-
-        # allData proxy: boolean / bit-string changes
-        changed_flags = []
-        if 'boolean' in df.columns and 'gocbRef' in df.columns:
-            ch = (df['boolean'] != df.groupby('gocbRef')['boolean'].shift()).astype(float)
-            ch.loc[df.groupby('gocbRef').head(1).index] = np.nan
-            changed_flags.append(ch)
-        if 'bit-string' in df.columns and 'gocbRef' in df.columns:
-            ch = (df['bit-string'] != df.groupby('gocbRef')['bit-string'].shift()).astype(float)
-            ch.loc[df.groupby('gocbRef').head(1).index] = np.nan
-            changed_flags.append(ch)
-        if changed_flags:
-            df['status_bit_change'] = np.nanmax(np.column_stack([c.fillna(0) for c in changed_flags]), axis=1)
-            if 'gocbRef' in df.columns:
-                df.loc[df.groupby('gocbRef').head(1).index, 'status_bit_change'] = np.nan
-        else:
-            df['status_bit_change'] = np.nan
-
-        # 2) Event consistency checks (Case 1)
-        if 'sqNum' in df.columns and 'st_change' in df.columns and 'gocbRef' in df.columns:
-            df['sq_reset_expected'] = ((df['st_change'] == 1.0) & (df['sqNum'].isin(list(_RESET_SET)))).astype(float)
-            df['sq_reset_violation'] = ((df['st_change'] == 1.0) & (~df['sqNum'].isin(list(_RESET_SET)))).astype(float)
-        else:
-            df['sq_reset_expected'] = np.nan
-            df['sq_reset_violation'] = np.nan
-
-        if 't_change' in df.columns and 'st_change' in df.columns:
-            df['t_st_consistency_violation'] = (df['t_change'].fillna(0) != df['st_change'].fillna(0)).astype(float)
-            df.loc[df['t_change'].isna(), 't_st_consistency_violation'] = np.nan
-        else:
-            df['t_st_consistency_violation'] = np.nan
-
-        if 'status_bit_change' in df.columns and 'st_change' in df.columns:
-            df['status_change_missing_on_event'] = ((df['st_change'] == 1.0) & (df['status_bit_change'] != 1.0)).astype(float)
-            df.loc[df['status_bit_change'].isna(), 'status_change_missing_on_event'] = np.nan
-
-
-        # 3) Heartbeat consistency (Case 2)
-        if 'timeAllowedtoLive' in df.columns and 'inter_arrival' in df.columns:
-            df['ttl_half'] = (df['timeAllowedtoLive'] / 2000.0).astype(float)
-            tol = 0.05 * df['ttl_half'] + 0.005  # 5% + 5ms
-            df['heartbeat_interval_error'] = (df['inter_arrival'] - df['ttl_half']).abs()
-            df['heartbeat_within_tol'] = (df['heartbeat_interval_error'] <= tol).astype(float)
-        else:
-            df['ttl_half'] = np.nan
-            df['heartbeat_interval_error'] = np.nan
-            df['heartbeat_within_tol'] = np.nan
-
-        if 'sqNum_delta' in df.columns and 'st_change' in df.columns:
-            df['sq_inc_expected'] = ((df['st_change'] == 0.0) & (df['sqNum_delta'] == 1)).astype(float)
-            df['sq_inc_violation_when_no_event'] = ((df['st_change'] == 0.0) & (df['sqNum_delta'] != 1)).astype(float)
-        else:
-            df['sq_inc_expected'] = np.nan
-            df['sq_inc_violation_when_no_event'] = np.nan
-
-        if 'status_bit_change' in df.columns and 'st_change' in df.columns:
-            df['status_change_violation_on_heartbeat'] = ((df['st_change'] == 0.0) & (df['status_bit_change'] == 1.0)).astype(float)
-            df.loc[df['status_bit_change'].isna(), 'status_change_violation_on_heartbeat'] = np.nan
-        else:
-            df['status_change_violation_on_heartbeat'] = np.nan
-
-        # 4) General hygiene
-        if 'stNum_delta' in df.columns:
-            df['stNum_jump_gt1'] = (df['stNum_delta'] > 1).astype(float)
-        else:
-            df['stNum_jump_gt1'] = np.nan
-
-        if 'sqNum' in df.columns and 'st_change' in df.columns:
-            df['sq_reset_without_st_change'] = ((df['st_change'] == 0.0) & (df['sqNum'].isin(list(_RESET_SET)))).astype(float)
-        else:
-            df['sq_reset_without_st_change'] = np.nan
-
-        if 'gocbRef' in df.columns and 'st_change' in df.columns:
-            df['event_id'] = df.groupby('gocbRef')['st_change'].fillna(0).cumsum()
-            df['msgs_since_last_event'] = df.groupby(['gocbRef', 'event_id']).cumcount()
-            if 'base_time' in df.columns:
-                first_time_in_event = df.groupby(['gocbRef', 'event_id'])['base_time'].transform('first')
-                df['time_since_last_event'] = df['base_time'] - first_time_in_event
-            else:
-                df['time_since_last_event'] = np.nan
-            df['event_msg_rank'] = df['msgs_since_last_event'].astype(float)
-        else:
-            df['event_id'] = np.nan
-            df['msgs_since_last_event'] = np.nan
-            df['time_since_last_event'] = np.nan
-            df['event_msg_rank'] = np.nan
-
-        return df
-
     # ------------------- Analysis Feature Set -------------------
 
     def _numeric_analysis_features(self, df: pd.DataFrame) -> List[str]:
         """Build the list of numeric features for stats/importance (no leakage)."""
-        if self.mode == 'core':
-            # CORE mode: only numeric fields from CORE_FIELDS
-            core_numeric = [
-                'timeAllowedtoLive', 'stNum', 'sqNum', 'Length',
-                'boolean_1', 'boolean_2', 'boolean_3',
-                'bitstring_numeric', 'bitstring_bitcount'
-            ]
-            numeric_cols = [c for c in core_numeric if c in df.columns]
-        else:
-            # FULL mode: raw + engineered
-            raw_numeric = [
-                'Epoch Time', 'Arrival Time', 'Length', 'Frame length on the wire',
-                'Frame length stored into the capture file', 'timeAllowedtoLive',
-                'stNum', 'sqNum',
-                'Time delta from previous captured frame',
-                'Time delta from previous displayed frame',
-                'Time since reference or first frame',
-                'Time shift for this packet',
-                'boolean_1', 'boolean_2', 'boolean_3',  # Updated
-                'bitstring_numeric', 'bitstring_bitcount',  # Updated
-            ]
-            raw_numeric = [c for c in raw_numeric if c in df.columns]
-
-            engineered = [
-                'base_time', 'inter_arrival', 'jitter_rolling_std',
-                'msg_rate', 'byte_rate',
-                'ttl_violation', 'ttl_margin',
-                'sqNum_delta', 'sqNum_jump',
-                'stNum_delta', 'stNum_change',
-                'sq_reset_on_st_change',
-                'length_delta',
-                'event_rate_spike',
-                'bit_density',
-                'st_change', 't_change', 'status_bit_change',
-                'sq_reset_expected', 'sq_reset_violation',
-                't_st_consistency_violation',
-                'status_change_missing_on_event',
-                'ttl_half', 'heartbeat_interval_error', 'heartbeat_within_tol',
-                'sq_inc_expected', 'sq_inc_violation_when_no_event',
-                'status_change_violation_on_heartbeat',
-                'stNum_jump_gt1', 'sq_reset_without_st_change',
-                'event_id', 'msgs_since_last_event', 'time_since_last_event', 'event_msg_rank',
-            ]
-            engineered = [c for c in engineered if c in df.columns]
-            numeric_cols = raw_numeric + engineered
-
-        numeric_cols = [c for c in numeric_cols if c != 'attack']
-        numeric_cols = [c for c in numeric_cols if pd.api.types.is_numeric_dtype(df[c])]
-        return numeric_cols
+        return get_numeric_features(df, mode=self.mode)
 
     # -------------------- Feature Statistics --------------------
 
@@ -494,7 +109,11 @@ class AttackCharacterizer:
 
         all_data = []
         for attack, df in self.train_data.items():
-            df_eng = self.engineer_features(df)
+            # Apply feature engineering if in full mode
+            if self.mode == 'full':
+                df_eng = engineer_features(df)
+            else:
+                df_eng = df.copy()
             all_data.append(df_eng)
 
         combined = pd.concat(all_data, ignore_index=True)
@@ -563,7 +182,10 @@ class AttackCharacterizer:
 
         all_data = []
         for _, df in self.train_data.items():
-            all_data.append(self.engineer_features(df))
+            if self.mode == 'full':
+                all_data.append(engineer_features(df))
+            else:
+                all_data.append(df.copy())
         df_all = pd.concat(all_data, ignore_index=True)
 
         numeric_cols = self._numeric_analysis_features(df_all)
@@ -669,7 +291,10 @@ class AttackCharacterizer:
 
         all_data = []
         for _, df in self.train_data.items():
-            all_data.append(self.engineer_features(df))
+            if self.mode == 'full':
+                all_data.append(engineer_features(df))
+            else:
+                all_data.append(df.copy())
         df_all = pd.concat(all_data, ignore_index=True)
 
         numeric_cols = self._numeric_analysis_features(df_all)
@@ -736,7 +361,10 @@ class AttackCharacterizer:
         signatures = {}
 
         for attack_type, df in self.train_data.items():
-            df_eng = self.engineer_features(df)
+            if self.mode == 'full':
+                df_eng = engineer_features(df)
+            else:
+                df_eng = df.copy()
             normal = df_eng[df_eng['attack'] == 0]
             attack = df_eng[df_eng['attack'] == 1]
 
@@ -886,7 +514,10 @@ class AttackCharacterizer:
 
         all_data = []
         for _, df in self.train_data.items():
-            all_data.append(self.engineer_features(df))
+            if self.mode == 'full':
+                all_data.append(engineer_features(df))
+            else:
+                all_data.append(df.copy())
         df_all = pd.concat(all_data, ignore_index=True)
 
         numeric_cols = self._numeric_analysis_features(df_all)
@@ -972,18 +603,22 @@ class AttackCharacterizer:
         return difficulty_df
 
     def corr_delta_heatmap(self):
+        """Generate correlation delta heatmap (Attack - Normal)."""
         all_data = []
         for _, df in self.train_data.items():
-            all_data.append(self.engineer_features(df))
+            if self.mode == 'full':
+                all_data.append(engineer_features(df))
+            else:
+                all_data.append(df.copy())
         df = pd.concat(all_data, ignore_index=True)
         features = self._numeric_analysis_features(df)
         mats = {}
-        for cls in [0,1]:
-            sub = df[df.attack==cls][features].copy()
-            sub = sub.dropna(axis=1, thresh=int(0.5*len(sub))).fillna(sub.median(numeric_only=True))
-            mats[cls] = sub.corr().clip(-1,1)
+        for cls in [0, 1]:
+            sub = df[df.attack == cls][features].copy()
+            sub = sub.dropna(axis=1, thresh=int(0.5 * len(sub))).fillna(sub.median(numeric_only=True))
+            mats[cls] = sub.corr().clip(-1, 1)
         delta = mats[1].reindex_like(mats[0]) - mats[0]
-        fig = plt.figure(figsize=(9,7))
+        fig = plt.figure(figsize=(9, 7))
         sns.heatmap(delta, center=0, cmap="coolwarm", vmin=-1, vmax=1)
         plt.title(f"Correlation delta (Attack – Normal) - {self.mode.upper()} Mode")
         plt.tight_layout()
