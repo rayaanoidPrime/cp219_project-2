@@ -240,7 +240,7 @@ class Task3BinaryDetection:
         # Identify zero-variance columns to be dropped
         cols_to_drop_variance = set(X_train.columns) - set(valid_cols_variance)
 
-        # *** MODIFICATION: Ensure 'boolean_1' is not dropped due to zero variance ***
+       
         if 'boolean_1' in cols_to_drop_variance:
             print(f"  Warning: 'boolean_1' has zero variance after imputation.")
             
