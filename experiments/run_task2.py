@@ -218,10 +218,7 @@ def main():
         print("W&B run finished.")
     
     print("\n✓ Task 2 completed successfully!")
-    print("\nNext steps:")
-    print("  1. Review generated figures in outputs/figures/task2/")
-    print("  2. Review generated tables in outputs/tables/task2/")
-    print("  3. Proceed to Task 3 (Binary Intrusion Detection)")
+  
     if logger:
         print(f"  4. View detailed results at: {logger.run.url}")
     

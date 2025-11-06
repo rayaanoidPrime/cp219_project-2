@@ -1,0 +1,25 @@
+used_fields
+Arrival Time
+Epoch Time
+Frame length on the wire
+Frame length stored into the capture file
+Length
+Time
+Time delta from previous captured frame
+Time delta from previous displayed frame
+Time shift for this packet
+Time since reference or first frame
+attack
+attack_type
+base_time
+bit-string
+bitstring_bitcount
+bitstring_numeric
+boolean_1
+boolean_2
+boolean_3
+gocbRef
+sqNum
+stNum
+t
+timeAllowedtoLive

@@ -23,6 +23,14 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     confusion_matrix, roc_auc_score, roc_curve
 )
+from src.preprocessing import (
+    preprocess_dataframe,
+    standardize_schema,
+    engineer_features,
+    get_numeric_features,
+    CORE_FIELDS,
+    ALLOWED_FIELDS
+)
 
 
 class BinaryDetector:
@@ -34,25 +42,46 @@ class BinaryDetector:
         self.config = config or {}
         self.train_time = 0
         self.inference_time = 0
+        self.train_labels_ = None  # Store training labels for DBSCAN
         
     def fit(self, X):
         """Train the model."""
         start = time.time()
-        self.model.fit(X)
+        
+        if isinstance(self.model, DBSCAN):
+            # DBSCAN fits and labels in one step
+            self.train_labels_ = self.model.fit_predict(X)
+        else:
+            self.model.fit(X)
+            
         self.train_time = time.time() - start
         return self
     
     def predict(self, X):
         """Predict anomalies."""
         start = time.time()
-        predictions = self.model.predict(X)
+        
+        # Handle DBSCAN separately
+        if isinstance(self.model, DBSCAN):
+            # DBSCAN doesn't have predict() - use fit_predict on test data
+            predictions = self.model.fit_predict(X)
+        else:
+            predictions = self.model.predict(X)
+        
         self.inference_time = (time.time() - start) / len(X)
         
         # Convert to binary (0=normal, 1=attack)
-        # Most sklearn models use -1 for anomalies, 1 for normal
-        if hasattr(self.model, 'predict'):
-            if isinstance(self.model, (IsolationForest, OneClassSVM)):
-                predictions = np.where(predictions == -1, 1, 0)
+        if isinstance(self.model, (IsolationForest, OneClassSVM)):
+            # These use -1 for anomalies, 1 for normal
+            predictions = np.where(predictions == -1, 1, 0)
+        elif isinstance(self.model, DBSCAN):
+            # DBSCAN: -1 = noise/outliers (treat as attacks), others = clusters (normal)
+            predictions = np.where(predictions == -1, 1, 0)
+        elif isinstance(self.model, (KMeans, GaussianMixture)):
+            # For clustering: assume smaller cluster is attacks
+            unique, counts = np.unique(predictions, return_counts=True)
+            minority_cluster = unique[np.argmin(counts)]
+            predictions = np.where(predictions == minority_cluster, 1, 0)
         
         return predictions
     
@@ -65,16 +94,21 @@ class BinaryDetector:
 class Task3BinaryDetection:
     """Task 3: Binary Intrusion Detection."""
     
-    def __init__(self, config: Dict[str, Any], logger=None):
+    def __init__(self, config: Dict[str, Any], logger=None, mode: str = 'core'):
+        """
+        Args:
+            mode: 'core' for CORE_FIELDS only, 'full' for CORE + ALLOWED + ENGINEERED
+        """
         self.config = config
         self.logger = logger
+        self.mode = mode
         self.train_data = {}
         self.test_data = {}
         
-        # Create output directories
-        self.fig_dir = Path('outputs/figures/task3')
-        self.table_dir = Path('outputs/tables/task3')
-        self.model_dir = Path('outputs/models/task3')
+        # Create output directories with mode suffix
+        self.fig_dir = Path(f'outputs/figures/task3_{mode}')
+        self.table_dir = Path(f'outputs/tables/task3_{mode}')
+        self.model_dir = Path(f'outputs/models/task3_{mode}')
         self.fig_dir.mkdir(parents=True, exist_ok=True)
         self.table_dir.mkdir(parents=True, exist_ok=True)
         self.model_dir.mkdir(parents=True, exist_ok=True)
@@ -83,8 +117,16 @@ class Task3BinaryDetection:
         sns.set_style("whitegrid")
         plt.rcParams['figure.dpi'] = 300
         
+        print(f"\n{'='*70}")
+        print(f"RUNNING TASK 3 IN '{mode.upper()}' MODE")
+        if mode == 'core':
+            print("Using ONLY the 10 CORE_FIELDS")
+        else:
+            print("Using CORE + ALLOWED + ENGINEERED features")
+        print(f"{'='*70}\n")
+        
     def load_data(self):
-        """Load all datasets."""
+        """Load datasets and apply preprocessing pipeline."""
         print("Loading datasets...")
         data_dir = Path(self.config['data']['raw_dir'])
         
@@ -94,26 +136,55 @@ class Task3BinaryDetection:
             train_file = self.config['data']['train_files'][attack]
             test_file = self.config['data']['test_files'][attack]
             
-            self.train_data[attack] = pd.read_csv(data_dir / train_file)
-            self.test_data[attack] = pd.read_csv(data_dir / test_file)
+            # Load raw data
+            train_df = pd.read_csv(data_dir / train_file)
+            test_df = pd.read_csv(data_dir / test_file)
             
-            print(f"  {attack}: Train={len(self.train_data[attack])}, "
-                  f"Test={len(self.test_data[attack])}")
+            # Select fields based on mode
+            if self.mode == 'core':
+                keep_train = [c for c in CORE_FIELDS if c in train_df.columns]
+                keep_test = [c for c in CORE_FIELDS if c in test_df.columns]
+            else:  # full mode
+                keep_train = [c for c in ALLOWED_FIELDS if c in train_df.columns]
+                keep_test = [c for c in ALLOWED_FIELDS if c in test_df.columns]
+            
+            train_df = train_df[keep_train].copy()
+            test_df = test_df[keep_test].copy()
+            
+            # Apply preprocessing
+            print(f"  Preprocessing {attack}...")
+            train_df = preprocess_dataframe(train_df)
+            train_df = standardize_schema(train_df)
+            test_df = preprocess_dataframe(test_df)
+            test_df = standardize_schema(test_df)
+            
+            # Engineer features (only in full mode)
+            if self.mode == 'full':
+                train_df = engineer_features(train_df)
+                test_df = engineer_features(test_df)
+            
+            self.train_data[attack] = train_df
+            self.test_data[attack] = test_df
+            
+            print(f"  {attack}: Train={len(train_df)}, Test={len(test_df)}, "
+                f"Features={len(train_df.columns)}")
         
         print(f"\nTotal train samples: {sum(len(df) for df in self.train_data.values())}")
         print(f"Total test samples: {sum(len(df) for df in self.test_data.values())}")
-    
-    def preprocess_data(self):
-        """Preprocess and combine all data."""
-        print("\nPreprocessing data...")
+
         
-        # Combine all training data
+    def preprocess_data(self):
+        """Preprocess and combine all data using common preprocessing."""
+        print("\nCombining and cleaning data...")
+        
+        # Combine all training and test data
         train_combined = pd.concat(list(self.train_data.values()), ignore_index=True)
         test_combined = pd.concat(list(self.test_data.values()), ignore_index=True)
         
-        # Select numeric features only
-        numeric_cols = train_combined.select_dtypes(include=[np.number]).columns
-        numeric_cols = [c for c in numeric_cols if c not in ['attack']]
+        # Get numeric features based on mode (excluding 'attack')
+        numeric_cols = get_numeric_features(train_combined, mode=self.mode)
+        
+        print(f"Using {len(numeric_cols)} numeric features from {self.mode.upper()} mode")
         
         # Extract features and labels
         X_train = train_combined[numeric_cols].copy()
@@ -128,27 +199,64 @@ class Task3BinaryDetection:
         
         # Drop columns with too many NaN values (>50%)
         threshold = len(X_train) * 0.5
-        valid_cols = X_train.columns[X_train.notna().sum() > threshold]
-        X_train = X_train[valid_cols]
-        X_test = X_test[valid_cols]
         
-        # Fill remaining NaN values
+        # Get columns that pass the NaN threshold
+        cols_passing_threshold = X_train.columns[X_train.notna().sum() > threshold]
+        
+        # Identify columns to be dropped
+        cols_to_drop = set(X_train.columns) - set(cols_passing_threshold)
+        
+        # *** MODIFICATION: Ensure 'boolean_1' is never dropped ***
+        if 'boolean_1' in cols_to_drop:
+            print("  Force-keeping 'boolean_1' column despite high NaN count.")
+            cols_to_drop.remove('boolean_1')
+            
+        # Get the final list of columns to keep
+        final_valid_cols = [col for col in X_train.columns if col not in cols_to_drop]
+        
+        X_train = X_train[final_valid_cols]
+        X_test = X_test[final_valid_cols]
+        
+        print(f"Features after dropping high-NaN columns: {len(X_train.columns)}")
+        
+        # Fill remaining NaN values with median
+        print("  Filling NaN values with column median...")
         for col in X_train.columns:
             median_val = X_train[col].median()
             if pd.isna(median_val):
                 median_val = 0
+            
+            # Add a log message for the requested column
+            if col == 'boolean_1' and X_train[col].isna().any():
+                print(f"    - Imputing 'boolean_1' NaN values with median: {median_val}")
+                
             X_train[col].fillna(median_val, inplace=True)
             X_test[col].fillna(median_val, inplace=True)
         
         # Drop columns with zero variance
         variances = X_train.var()
-        valid_cols = variances[variances > 0].index
-        X_train = X_train[valid_cols]
-        X_test = X_test[valid_cols]
+        valid_cols_variance = variances[variances > 0].index
+        
+        # Identify zero-variance columns to be dropped
+        cols_to_drop_variance = set(X_train.columns) - set(valid_cols_variance)
+
+       
+        if 'boolean_1' in cols_to_drop_variance:
+            print(f"  Warning: 'boolean_1' has zero variance after imputation.")
+            
+        final_valid_cols = [col for col in X_train.columns if col not in cols_to_drop_variance]
+        
+        X_train = X_train[final_valid_cols]
+        X_test = X_test[final_valid_cols]
         
         print(f"Features after cleaning: {len(X_train.columns)}")
         print(f"Train samples: {len(X_train)}, Attack ratio: {y_train.mean():.2%}")
         print(f"Test samples: {len(X_test)}, Attack ratio: {y_test.mean():.2%}")
+        
+        # Save feature list
+        feature_list = pd.DataFrame({'feature': list(X_train.columns)})
+        feature_list.to_csv(self.table_dir / 'features_used.csv', index=False)
+        print(f"Saved feature list to {self.table_dir / 'features_used.csv'}")
         
         # Standardize features
         print("Standardizing features...")
@@ -324,8 +432,8 @@ class Task3BinaryDetection:
         
         # 1. Performance metrics comparison
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle('Model Performance Comparison', fontsize=14, fontweight='bold')
-        
+        fig.suptitle(f'Model Performance Comparison ({self.mode.upper()} Mode)', 
+             fontsize=14, fontweight='bold')        
         metrics = ['Accuracy', 'Precision', 'Recall', 'F1-Score']
         for idx, metric in enumerate(metrics):
             ax = axes[idx // 2, idx % 2]
@@ -473,49 +581,66 @@ class Task3BinaryDetection:
 
 def run_task3(config: Dict[str, Any], logger=None) -> Dict:
     """
-    Execute Task 3: Binary Intrusion Detection.
+    Execute Task 3: Binary Intrusion Detection in BOTH modes.
     
-    Args:
-        config: Configuration dictionary
-        logger: WandbLogger instance (optional)
-    
-    Returns:
-        Dictionary with results
+    Returns results for both CORE-only and FULL (CORE+ALLOWED+ENGINEERED) modes.
     """
-    task3 = Task3BinaryDetection(config, logger)
+    results = {}
     
-    # Load data
-    task3.load_data()
+    # Run both modes
+    for mode in ['core', 'full']:
+        print(f"\n{'#'*70}")
+        print(f"# STARTING {mode.upper()} MODE ANALYSIS")
+        print(f"{'#'*70}\n")
+        
+        task3 = Task3BinaryDetection(config, logger, mode=mode)
+        
+        # Load data
+        task3.load_data()
+        
+        # Preprocess
+        X_train, y_train, X_test, y_test = task3.preprocess_data()
+        
+        # Train and evaluate all models
+        results_df, all_predictions = task3.train_and_evaluate_all(
+            X_train, y_train, X_test, y_test
+        )
+        
+        # Visualize results
+        task3.visualize_results(results_df)
+        
+        # Generate summary
+        results_df = task3.generate_summary(results_df)
+        
+        # Log to W&B
+        if logger:
+            logger.log_dataframe(
+                results_df[['Model', 'Accuracy', 'Precision', 'Recall', 'F1-Score']], 
+                f"task3_{mode}/model_comparison"
+            )
+        
+        best_model = results_df.iloc[0]
+        results[mode] = {
+            'status': 'completed',
+            'best_model': best_model['Model'],
+            'best_f1_score': float(best_model['F1-Score']),
+            'best_accuracy': float(best_model['Accuracy']),
+            'results_table': results_df,
+            'all_predictions': all_predictions
+        }
+        
+        print(f"\n✓ Task 3 ({mode.upper()} mode) completed successfully!")
+        print(f"All outputs saved to outputs/figures/task3_{mode}/ "
+              f"and outputs/tables/task3_{mode}/")
     
-    # Preprocess
-    X_train, y_train, X_test, y_test = task3.preprocess_data()
+    print("\n" + "="*70)
+    print("TASK 3 COMPLETE - BOTH MODES FINISHED")
+    print("="*70)
+    print("\nResults available in:")
+    print("  - outputs/figures/task3_core/ and outputs/tables/task3_core/")
+    print("  - outputs/figures/task3_full/ and outputs/tables/task3_full/")
     
-    # Train and evaluate all models
-    results_df, all_predictions = task3.train_and_evaluate_all(X_train, y_train, X_test, y_test)
-    
-    # Visualize results
-    task3.visualize_results(results_df)
-    
-    # Generate summary
-    results_df = task3.generate_summary(results_df)
-    
-    # Log to W&B
-    if logger:
-        logger.log_dataframe(results_df[['Model', 'Accuracy', 'Precision', 'Recall', 'F1-Score']], 
-                            "task3/model_comparison")
-    
-    print("\n✓ Task 3 (Binary Intrusion Detection) completed successfully!")
-    print(f"All outputs saved to outputs/figures/task3/ and outputs/tables/task3/")
-    
-    best_model = results_df.iloc[0]
-    return {
-        'status': 'completed',
-        'best_model': best_model['Model'],
-        'best_f1_score': float(best_model['F1-Score']),
-        'best_accuracy': float(best_model['Accuracy']),
-        'results_table': results_df,
-        'all_predictions': all_predictions
-    }
+    return results
 
 
 if __name__ == '__main__':
