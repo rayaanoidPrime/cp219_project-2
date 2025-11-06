@@ -1,7 +1,6 @@
-gocbRef,Total Messages,stNum Changes,Rule 1 Violations,Violations+Attacks,Rule 1 Violation Rate
-SEL_421_distCFG/LLN0$GO$CB_pro,5770,58,4,0,6.90%
-SEL_421_distCFG/LLN0$GO$CB_dis,5895,278,167,50,60.07%
-ied_disjuntoried_disjuntor1/LL,7044,281,6,1,2.14%
-ied_disjuntor2ied_disjuntor2/L,5077,281,3,0,1.07%
-ied_protecaoPROT/LLN0$GO$prot_,3149,56,2,0,3.57%
-ied_protecaoPROT/LLN0$GO$trip2,3323,280,164,50,58.57%
+gocbRef,Total Messages,stNum Changes,Rule 1 Violations,Rule 1 Violation Rate
+SEL_421_distCFG/LLN0$GO$CB_pro,11554,110,6,5.45%
+SEL_421_distCFG/LLN0$GO$CB_dis,11826,556,332,59.71%
+ied_disjuntoried_disjuntor1/LL,14109,564,13,2.30%
+ied_disjuntor2ied_disjuntor2/L,10111,556,6,1.08%
+ied_protecaoPROT/LLN0$GO$prot_,6282,108,4,3.70%
