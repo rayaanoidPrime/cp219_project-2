@@ -207,7 +207,155 @@ class GOOSEDataExplorer:
             logger.log_figure(fig, "task1_temporal_patterns")
         
         plt.close()
-    
+
+    def plot_heartbeat_by_gocbref_split_by_attacktype(
+        self,
+        df: pd.DataFrame,
+        logger: WandbLogger = None,
+        max_gocbref_plots: int | None = None,
+        downsample_max_points: int = 15000,
+        attack_types_order: List[str] = ("replay", "masquerade", "injection", "poisoning"),
+    ):
+        """
+        For each gocbRef and attack_type:
+          - x: relative time (s) from first sample in that subset
+          - y-left: stNum (blue step line)
+          - y-right: sqNum (orange step line)
+          - Red shaded regions = attack periods
+          - Blue verticals = stNum changes
+          - Orange dots = sqNum resets to 0
+        Saves plots to outputs/figures/heartbeat_split/<gocbRef>__<attack_type>.png
+        """
+        req = {'gocbRef', 'Time', 'stNum', 'sqNum', 'attack', 'attack_type'}
+        miss = req - set(df.columns)
+        if miss:
+            print(f"[heartbeat_split] Missing columns: {sorted(miss)}")
+            return
+
+        out_dir = self.output_dir / "heartbeat_split"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def _sanitize(s: str) -> str:
+            for ch in '<>:"/\\|?*':
+                s = s.replace(ch, '_')
+            return s[:90]
+
+        # ---- handle Time ----
+        df = df.copy()
+        if pd.api.types.is_datetime64_any_dtype(df['Time']):
+            pass
+        elif pd.api.types.is_string_dtype(df['Time']):
+            parsed = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+            if parsed.notna().mean() > 0.8:
+                df['Time'] = parsed
+            else:
+                df['Time'] = pd.to_numeric(df['Time'], errors='coerce')
+        else:
+            df['Time'] = pd.to_numeric(df['Time'], errors='coerce')
+
+        g_list = list(df.groupby('gocbRef'))
+        if max_gocbref_plots is not None:
+            g_list = g_list[:max_gocbref_plots]
+
+        for gname, gdf in g_list:
+            gdf = gdf.sort_values('Time').dropna(subset=['Time'])
+            if len(gdf) < 2:
+                continue
+
+            atypes = [a for a in attack_types_order if a in gdf['attack_type'].unique()]
+            for atype in atypes:
+                sub = gdf[gdf['attack_type'] == atype].copy()
+                if len(sub) < 2:
+                    continue
+
+                # --- relative time ---
+                if pd.api.types.is_datetime64_any_dtype(sub['Time']):
+                    t0 = sub['Time'].iloc[0]
+                    sub['t_rel'] = (sub['Time'] - t0).dt.total_seconds()
+                else:
+                    t0 = float(sub['Time'].iloc[0])
+                    sub['t_rel'] = sub['Time'].astype(float) - t0
+
+                sub = sub.sort_values('t_rel')
+                if len(sub) > downsample_max_points:
+                    step = int(np.ceil(len(sub) / downsample_max_points))
+                    sub = sub.iloc[::step, :]
+
+                sub['st_change'] = sub['stNum'].diff().fillna(0).ne(0)
+                sub['sq_reset'] = sub['sqNum'].eq(0)
+
+                fig, axL = plt.subplots(figsize=(14, 6))
+                axR = axL.twinx()
+
+                # Shade attack spans
+                attk = sub['attack'].astype(int).values
+                t = sub['t_rel'].values
+                if attk.any():
+                    idx = np.where(np.diff(np.r_[0, attk, 0]) != 0)[0]
+                    spans = list(zip(idx[0::2], idx[1::2]))
+                    for s, e in spans:
+                        axL.axvspan(
+                            t[s], t[e - 1 if e - 1 < len(t) else -1],
+                            color='red', alpha=0.08, lw=0
+                        )
+
+                # Step lines
+                l1, = axL.plot(
+                    sub['t_rel'], sub['stNum'],
+                    drawstyle='steps-post', linewidth=1.4,
+                    color='tab:blue', label='stNum'
+                )
+                l2, = axR.plot(
+                    sub['t_rel'], sub['sqNum'],
+                    drawstyle='steps-post', linewidth=1.2,
+                    color='tab:orange', alpha=0.9, label='sqNum'
+                )
+
+                # Event markers
+                for x in sub.loc[sub['st_change'], 't_rel']:
+                    axL.axvline(x, color='tab:blue', alpha=0.15, lw=0.8)
+                axR.scatter(
+                    sub.loc[sub['sq_reset'], 't_rel'],
+                    sub.loc[sub['sq_reset'], 'sqNum'],
+                    s=14, color='tab:orange', alpha=0.8,
+                    zorder=5, label='sqNum reset=0'
+                )
+
+                # Axes
+                axL.set_xlabel('Time (s, relative)')
+                axL.set_ylabel('stNum', color='tab:blue')
+                axR.set_ylabel('sqNum', color='tab:orange')
+                axL.grid(alpha=0.3)
+
+                # Legend
+                h1, lab1 = axL.get_legend_handles_labels()
+                h2, lab2 = axR.get_legend_handles_labels()
+                seen, H, L = set(), [], []
+                for h, l in list(zip(h1 + h2, lab1 + lab2)):
+                    if l not in seen:
+                        H.append(h); L.append(l); seen.add(l)
+                axL.legend(H, L, loc='upper left', fontsize=9)
+
+                axL.set_title(
+                    f"Heartbeat — gocbRef: {str(gname)[:80]} | attack_type: {atype} | n={len(sub)}",
+                    pad=10
+                )
+
+                # Margins
+                xmin, xmax = sub['t_rel'].min(), sub['t_rel'].max()
+                rng = xmax - xmin if xmax > xmin else 1.0
+                axL.set_xlim(xmin - 0.01 * rng, xmax + 0.01 * rng)
+
+                fname = f"{_sanitize(str(gname))}__{atype}.png"
+                path = out_dir / fname
+                fig.savefig(path, dpi=300, bbox_inches='tight')
+                print(f"Saved: {path}")
+
+                if logger:
+                    logger.log_figure(fig, f"heartbeat_split/{_sanitize(str(gname))}__{atype}")
+
+                plt.close(fig)
+
     def plot_feature_distributions(self, df: pd.DataFrame, logger: WandbLogger = None):
         """Plot distributions of key features."""
         # Select numerical features
@@ -547,6 +695,12 @@ def run_task1(config: Dict[str, Any], logger: WandbLogger = None) -> Dict:
     explorer.plot_correlation_analysis(all_data, logger)
     explorer.plot_dimensionality_reduction(all_data, logger)
     explorer.analyze_goose_rules(all_data, logger)
+    # Heartbeat plots per gocbRef (cap at, say, first 20 to keep it manageable)
+    explorer.plot_heartbeat_by_gocbref_split_by_attacktype(
+    train_data, logger, max_gocbref_plots=20
+)
+
+
     df_events = explorer.detect_goose_events(all_data, logger)
     
     print("\n✓ Task 1 completed!")
