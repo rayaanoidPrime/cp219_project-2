@@ -243,11 +243,7 @@ def main():
         print("W&B run finished.")
     
     print("\n✓ Task 3 completed successfully!")
-    print("\nNext steps:")
-    print("  1. Review model comparison in outputs/tables/task3/model_comparison.csv")
-    print("  2. Examine visualizations in outputs/figures/task3/")
-    print("  3. Check saved models in outputs/models/task3/")
-    print("  4. Proceed to Task 4 (Multi-class Attack Detection)")
+
     if logger:
         print(f"  5. View detailed results at: {logger.run.url}")
     

@@ -1,6 +1,5 @@
 """
-Common preprocessing utilities for GOOSE intrusion detection tasks.
-Shared between Task 2 (characterization) and Task 3+ (detection).
+Preprocessing.py code for dataset loading and feature engineering.
 """
 
 import numpy as np
@@ -441,3 +440,80 @@ def load_and_preprocess(filepath: str, mode: str = 'core') -> pd.DataFrame:
         df = engineer_features(df)
     
     return df
+
+
+def load_combined_datasets(data_dir, train_files: dict, test_files: dict, mode: str = 'core'):
+    """
+    Load and combine all attack datasets into single training and test sets.
+    
+    Args:
+        data_dir: Path to data directory
+        train_files: Dict mapping attack_type -> train filename
+        test_files: Dict mapping attack_type -> test filename
+        mode: 'core' or 'full'
+    
+    Returns:
+        Tuple of (combined_train_df, combined_test_df)
+    """
+    from pathlib import Path
+    
+    data_dir = Path(data_dir)
+    train_dfs = []
+    test_dfs = []
+    
+    print("\nLoading and combining all attack datasets...")
+    
+    for attack_type in (train_files.keys()):
+        # if attack_type.lower() == 'poisoning':
+        #     print(f"  ➤ Skipping {attack_type} dataset.")
+        #     continue
+        print(f"  Loading {attack_type}...")
+        
+        # Load train
+        train_file = data_dir / train_files[attack_type]
+        train_df = pd.read_csv(train_file)
+        
+        # Load test
+        test_file = data_dir / test_files[attack_type]
+        test_df = pd.read_csv(test_file)
+        
+        # Select fields based on mode
+        if mode == 'core':
+            keep_train = [c for c in CORE_FIELDS if c in train_df.columns]
+            keep_test = [c for c in CORE_FIELDS if c in test_df.columns]
+        else:  # full mode
+            keep_train = [c for c in ALLOWED_FIELDS if c in train_df.columns]
+            keep_test = [c for c in ALLOWED_FIELDS if c in test_df.columns]
+        
+        train_df = train_df[keep_train].copy()
+        test_df = test_df[keep_test].copy()
+        
+        # Apply preprocessing
+        train_df = preprocess_dataframe(train_df)
+        train_df = standardize_schema(train_df)
+        test_df = preprocess_dataframe(test_df)
+        test_df = standardize_schema(test_df)
+        
+        # Engineer features (only in full mode)
+        if mode == 'full':
+            train_df = engineer_features(train_df)
+            test_df = engineer_features(test_df)
+
+         # Tag dataset rows with their attack source (required for balanced evaluation)
+        train_df['attack_type'] = attack_type
+        test_df['attack_type'] = attack_type
+        
+        train_dfs.append(train_df)
+        test_dfs.append(test_df)
+        
+        print(f"    {attack_type}: Train={len(train_df)}, Test={len(test_df)}")
+    
+    # Combine all datasets
+    combined_train = pd.concat(train_dfs, ignore_index=True)
+    combined_test = pd.concat(test_dfs, ignore_index=True)
+    
+    print(f"\n  Combined datasets:")
+    print(f"    Total Train: {len(combined_train)}, Attack ratio: {combined_train['attack'].mean():.2%}")
+    print(f"    Total Test: {len(combined_test)}, Attack ratio: {combined_test['attack'].mean():.2%}")
+    
+    return combined_train, combined_test
