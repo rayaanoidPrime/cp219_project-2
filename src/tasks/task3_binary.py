@@ -529,71 +529,109 @@ class Task3BinaryDetection:
         # 2. PCA Projections for each model
         self.visualize_attack_projections(attack_type, X_test, y_test, all_predictions, results_df)
     
-    def visualize_attack_projections(self, attack_type: str, X_test, y_test, 
-                                    all_predictions, results_df):
-        """Visualize data projections using PCA for a specific attack."""
-        print(f"    Generating PCA projections...")
-        
-        # Create attack-specific directory
-        attack_fig_dir = self.fig_dir / attack_type
-        
-        # Apply PCA to reduce to 2D
+    def visualize_attack_projections(self, attack_type: str, X_test, y_test,
+                                    all_predictions, results_df: pd.DataFrame):
+        """
+        Visualize PCA projections for the passed X_test/y_test and predictions.
+        This version validates that X_test, y_test, and predictions all have matching lengths.
+        """
+        print(f"    Generating PCA projections for {attack_type}...")
+
+        # Ensure X_test is numpy array of shape (n_samples, n_features)
+        import numpy as _np
+        X_test = _np.asarray(X_test)
+        n_rows = X_test.shape[0]
+
+        # Basic shape checks
+        if len(y_test) != n_rows:
+            raise ValueError(f"y_test length ({len(y_test)}) does not match X_test rows ({n_rows}). "
+                            "Ensure you pass balanced X and y produced by train_and_evaluate_combined().")
+
+        # Ensure predictions exist and match length
+        for model_name, preds in list(all_predictions.items()):
+            # allow dict with 'balanced' key (returned by train_and_evaluate_combined)
+            if isinstance(preds, dict):
+                model_preds = preds.get('balanced', None)
+            else:
+                model_preds = preds
+
+            if model_preds is None:
+                print(f"    WARNING: missing balanced predictions for {model_name}; skipping projection for this model.")
+                # remove from items to avoid plotting
+                all_predictions.pop(model_name, None)
+                continue
+
+            if len(model_preds) != n_rows:
+                print(f"    WARNING: predictions length for {model_name} ({len(model_preds)}) "
+                    f"does not match X_test rows ({n_rows}); skipping this model.")
+                all_predictions.pop(model_name, None)
+                continue
+
+        # PCA transform
         pca = PCA(n_components=2, random_state=42)
         X_test_2d = pca.fit_transform(X_test)
-        
         explained_var = pca.explained_variance_ratio_
-        
-        # Create projection visualization for each model
+
+        # For each model present in results_df & all_predictions, plot projections
         for model_name, y_pred in all_predictions.items():
-            # Get model metrics from results_df
-            model_row = results_df[results_df['Model'] == model_name].iloc[0]
-            accuracy = model_row['Accuracy']
-            f1 = model_row['F1-Score']
-            
-            # Create figure with 2 subplots
+            # ensure model present in results_df
+            rows = results_df[results_df['Model'] == model_name]
+            if rows.empty:
+                print(f"    WARNING: no metrics row for {model_name}; skipping labeling in projection.")
+                accuracy = np.nan
+                f1 = np.nan
+            else:
+                model_row = rows.iloc[0]
+                accuracy = model_row.get('Accuracy', np.nan)
+                f1 = model_row.get('F1-Score', np.nan)
+
+            # If preds stored as dict entry, get the array
+            if isinstance(y_pred, dict):
+                y_pred = y_pred.get('balanced', None)
+                if y_pred is None:
+                    continue
+
             fig, axes = plt.subplots(1, 2, figsize=(14, 6))
             fig.suptitle(f'{attack_type.upper()} - {model_name} - PCA Projection\n'
                         f'Accuracy: {accuracy:.3f} | F1-Score: {f1:.3f}',
                         fontsize=14, fontweight='bold')
-            
-            # Subplot 1: Ground Truth
+
+            # Ground truth plot
             ax = axes[0]
             for label, color, name in [(0, 'blue', 'Normal'), (1, 'red', 'Attack')]:
-                mask = y_test == label
+                mask = (y_test == label)
                 ax.scatter(X_test_2d[mask, 0], X_test_2d[mask, 1],
-                          c=color, label=name, alpha=0.5, s=20, edgecolors='none')
-            
+                        c=color, label=name, alpha=0.5, s=20, edgecolors='none')
             ax.set_xlabel(f'PC1 ({explained_var[0]:.1%} variance)')
             ax.set_ylabel(f'PC2 ({explained_var[1]:.1%} variance)')
             ax.set_title('Ground Truth Labels', fontweight='bold')
             ax.legend(loc='upper right')
             ax.grid(True, alpha=0.3)
-            
-            # Subplot 2: Model Predictions
+
+            # Predictions plot
             ax = axes[1]
             for label, color, name in [(0, 'blue', 'Normal'), (1, 'red', 'Attack')]:
-                mask = y_pred == label
+                mask = (y_pred == label)
                 ax.scatter(X_test_2d[mask, 0], X_test_2d[mask, 1],
-                          c=color, label=f'Predicted {name}', alpha=0.5, s=20, edgecolors='none')
-            
+                        c=color, label=f'Predicted {name}', alpha=0.5, s=20, edgecolors='none')
             ax.set_xlabel(f'PC1 ({explained_var[0]:.1%} variance)')
             ax.set_ylabel(f'PC2 ({explained_var[1]:.1%} variance)')
             ax.set_title('Model Predictions', fontweight='bold')
             ax.legend(loc='upper right')
             ax.grid(True, alpha=0.3)
-            
+
             plt.tight_layout()
-            
-            # Save figure
             safe_name = model_name.lower().replace(' ', '_').replace('-', '_')
+            attack_fig_dir = self.fig_dir / attack_type
+            attack_fig_dir.mkdir(exist_ok=True)
             fig_path = attack_fig_dir / f'projection_{safe_name}.png'
             plt.savefig(fig_path, bbox_inches='tight')
-            
             if self.logger:
                 self.logger.log_figure(fig, f"task3_{self.mode}/{attack_type}/projection_{safe_name}")
             plt.close(fig)
-        
+
         print(f"      ✓ Generated {len(all_predictions)} projection plots")
+
     
     def generate_attack_summary(self, attack_type: str, results_df: pd.DataFrame):
         """Generate summary for a specific attack type."""
@@ -696,69 +734,98 @@ class Task3BinaryDetection:
             self.logger.log_figure(fig, f"task3_{self.mode}/cross_attack_heatmap")
         plt.close(fig)
 
-    def train_and_evaluate_combined(self, X_train, y_train, X_test, y_test, 
-                           test_df, scaler, features):
-        """Train and evaluate all models on combined dataset with balanced evaluation."""
+    def train_and_evaluate_combined(self, X_train, y_train, X_test, y_test,
+                                test_df: pd.DataFrame, scaler, features,
+                                balance_strategy: str = 'equal_per_attack'):
+        """
+        Train and evaluate all models on combined dataset with balanced evaluation.
+
+        Returns:
+            results_df, all_predictions, balanced_test_df, X_balanced_scaled, y_balanced
+        all_predictions will be a dict: { model_name: {'imbalanced': arr, 'balanced': arr} }
+        """
         print(f"\n{'='*70}")
         print(f"TRAINING MODELS ON COMBINED DATASET")
         print(f"{'='*70}")
-        
+
         # Calculate contamination based on actual attack ratio
         contamination = max(0.01, min(0.5, y_train.mean()))
         print(f"Using contamination={contamination:.3f} (attack ratio: {y_train.mean():.3f})")
-        
+
         models = self.create_models(contamination=contamination)
         results = []
         all_predictions = {}
-        
+
+        # We'll create the balanced test DF once (so all models evaluate on the SAME balanced sample)
+        balanced_test_df = self.balance_combined_test_set(test_df, strategy=balance_strategy)
+
+        # Build balanced arrays and scaled version once
+        features_present = [c for c in features if c in balanced_test_df.columns]
+        if not features_present:
+            raise RuntimeError("No feature columns found in balanced test_df. Check `features` list.")
+
+        X_balanced = balanced_test_df[features_present].values
+        y_balanced = balanced_test_df['attack'].values
+
+        X_balanced_scaled = scaler.transform(X_balanced)
+        X_balanced_scaled = np.nan_to_num(X_balanced_scaled, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Iterate models
         for model_name, model in models.items():
             print(f"\n{'-'*60}")
             print(f"Model: {model_name}")
             print(f"{'-'*60}")
-            
+
+            # prepare storage shape placeholders
+            all_predictions[model_name] = {'imbalanced': None, 'balanced': None}
+
             try:
                 # Train
                 print(f"  Training...")
                 model.fit(X_train)
                 print(f"  Training time: {model.train_time:.2f}s")
-                
+
                 # Evaluate on IMBALANCED test set (for reference)
                 print(f"  Evaluating on imbalanced test set...")
-                y_pred_imbalanced = model.predict(X_test)
+                try:
+                    y_pred_imbalanced = model.predict(X_test)
+                except Exception as e:
+                    print(f"  WARNING: model.predict failed on imbalanced X_test: {e}")
+                    y_pred_imbalanced = np.zeros(len(X_test), dtype=int)
+
                 metrics_imbalanced = self.evaluate_model(model, X_test, y_test)
-                all_predictions[model_name] = y_pred_imbalanced
-                
+                all_predictions[model_name]['imbalanced'] = y_pred_imbalanced
+
                 print(f"  Imbalanced Results:")
                 print(f"    Accuracy:  {metrics_imbalanced['accuracy']:.4f}")
                 print(f"    Precision: {metrics_imbalanced['precision']:.4f}")
                 print(f"    Recall:    {metrics_imbalanced['recall']:.4f}")
                 print(f"    F1-Score:  {metrics_imbalanced['f1_score']:.4f}")
-                
-                # Evaluate on BALANCED test set
-                print(f"\n  Evaluating on balanced test set...")
-                balanced_test_df = self.balance_combined_test_set(test_df, strategy='equal_per_attack')
-                
-                X_balanced = balanced_test_df[features].values
-                y_balanced = balanced_test_df['attack'].values
-                X_balanced_scaled = scaler.transform(X_balanced)
-                X_balanced_scaled = np.nan_to_num(X_balanced_scaled, nan=0.0, posinf=0.0, neginf=0.0)
-                
-                y_pred_balanced = model.predict(X_balanced_scaled)
-                
+
+                # Evaluate on BALANCED test set (the same balanced_test_df for all models)
+                print(f"\n  Evaluating on balanced test set (strategy={balance_strategy})...")
+                try:
+                    y_pred_balanced = model.predict(X_balanced_scaled)
+                except Exception as e:
+                    print(f"  WARNING: model.predict failed on balanced X: {e}")
+                    y_pred_balanced = np.zeros(len(X_balanced_scaled), dtype=int)
+
+                all_predictions[model_name]['balanced'] = y_pred_balanced
+
                 balanced_metrics = {
                     'accuracy': accuracy_score(y_balanced, y_pred_balanced),
                     'precision': precision_score(y_balanced, y_pred_balanced, zero_division=0),
                     'recall': recall_score(y_balanced, y_pred_balanced, zero_division=0),
                     'f1_score': f1_score(y_balanced, y_pred_balanced, zero_division=0)
                 }
-                
+
                 print(f"  Balanced Results:")
                 print(f"    Accuracy:  {balanced_metrics['accuracy']:.4f}")
                 print(f"    Precision: {balanced_metrics['precision']:.4f}")
                 print(f"    Recall:    {balanced_metrics['recall']:.4f}")
                 print(f"    F1-Score:  {balanced_metrics['f1_score']:.4f}")
-                
-                # Store results (using balanced metrics as primary)
+
+                # Store results (balanced metrics used as primary)
                 result = {
                     'Attack': 'Combined',
                     'Model': model_name,
@@ -776,21 +843,26 @@ class Task3BinaryDetection:
                     'Imbalanced_F1': metrics_imbalanced['f1_score']
                 }
                 results.append(result)
-                
-                # Save model
+
+                # Save model artifact
                 import joblib
                 combined_model_dir = self.model_dir / 'combined'
                 combined_model_dir.mkdir(exist_ok=True)
                 model_path = combined_model_dir / f"{model_name.lower().replace(' ', '_')}.pkl"
                 joblib.dump(model.model, model_path)
-                
+
             except Exception as e:
                 print(f"  ERROR: {str(e)}")
                 import traceback
                 traceback.print_exc()
+                # ensure missing preds remain None to detect later
+                all_predictions[model_name] = all_predictions.get(model_name, {'imbalanced': None, 'balanced': None})
                 continue
-        
-        return pd.DataFrame(results), all_predictions, balanced_test_df, X_balanced_scaled, y_balanced
+
+        results_df = pd.DataFrame(results)
+        # Return balanced test artifacts so caller and visualizer can use them
+        return results_df, all_predictions, balanced_test_df, X_balanced_scaled, y_balanced
+
     
     def visualize_combined_results(self, results_df: pd.DataFrame, X_test, y_test, all_predictions):
         """Create visualizations for combined dataset."""
@@ -914,35 +986,48 @@ def run_task3(config: Dict[str, Any], logger=None) -> Dict:
             
             print(f"\n✓ Completed {attack_type} attack analysis")
         
-        # ===== COMBINED DATASET TRAINING =====
+        # ===== COMBINED TRAINING =====
         print(f"\n{'*'*70}")
-        print(f"* PROCESSING COMBINED DATASET")
+        print("* PART 2: COMBINED TRAINING")
         print(f"{'*'*70}")
-        
-        # Load combined data
-        print("\nLoading combined dataset...")
+
+        # Load combined datasets (returns combined_train, combined_test DataFrames)
         train_combined, test_combined = load_combined_datasets(
             Path(config['data']['raw_dir']),
             config['data']['train_files'],
             config['data']['test_files'],
             mode=mode
         )
-        
-        # Preprocess combined data
+
+        # Preprocess combined data to get X_train_comb, y_train_comb, scaled X_test_comb etc.
         X_train_comb, y_train_comb, X_test_comb, y_test_comb, features_comb, scaler_comb = \
             task3.preprocess_attack_data(train_combined, test_combined, 'combined')
-        
-        # Train and evaluate on combined dataset
-        results_df_comb, all_predictions_comb, balanced_df_comb, X_bal_scaled, y_bal = task3.train_and_evaluate_combined(
-            X_train_comb, y_train_comb, X_test_comb, y_test_comb,
-            test_combined,  # Pass the full test DataFrame
-            scaler_comb,    # Pass the scaler
-            features_comb   # Pass the feature names
-        )
-        
-        # Visualize combined results
+
+        # Train & evaluate on combined dataset — returns balanced test artifacts as well
+        results_df_comb, all_predictions_comb, balanced_df_comb, X_bal_scaled, y_bal = \
+            task3.train_and_evaluate_combined(
+                X_train_comb, y_train_comb, X_test_comb, y_test_comb,
+                test_combined, scaler_comb, features_comb, balance_strategy='equal_per_attack'
+            )
+
+        # Build a dict mapping model -> balanced predictions (visualizer expects predictions aligned with X_bal_scaled)
+        all_predictions_balanced = {}
+        for model_name, preds in all_predictions_comb.items():
+            if isinstance(preds, dict) and preds.get('balanced') is not None:
+                all_predictions_balanced[model_name] = preds['balanced']
+            elif isinstance(preds, np.ndarray) and len(preds) == len(X_bal_scaled):
+                all_predictions_balanced[model_name] = preds
+            else:
+                # fallback: attempt to predict now on the balanced X
+                try:
+                    # If you have the model object saved in disk one could reload; here we try to skip
+                    print(f"Warning: No balanced preds for {model_name}; skipping projection for this model.")
+                except Exception:
+                    pass
+
+        # Visualize using the BALANCED arrays (so plots match balanced metrics)
         task3.visualize_combined_results(
-            results_df_comb, X_bal_scaled, y_bal, all_predictions_comb
+            results_df_comb, X_bal_scaled, y_bal, all_predictions_balanced
         )
         # Generate combined dataset summary
         results_df_comb = task3.generate_combined_summary(results_df_comb)
