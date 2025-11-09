@@ -4,6 +4,7 @@ Perform unsupervised multi-class classification among Normal traffic and four at
 Compare multiple unsupervised algorithms using macro-averaged metrics and confusion matrices.
 """
 
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -200,9 +201,125 @@ class MultiClassDetector:
         return mapping
     
     def get_memory_mb(self):
-        """Estimate memory footprint."""
-        import sys
-        return sys.getsizeof(self.model) / (1024 * 1024)
+        """
+        Estimate memory footprint more accurately.
+        
+        This accounts for:
+        - Model parameters (numpy arrays)
+        - Training data cache (for Hierarchical)
+        - Cluster assignments
+        """
+        total_bytes = 0
+        
+        # 1. Base model object
+        total_bytes += sys.getsizeof(self.model)
+        
+        # 2. Model-specific memory (numpy arrays in sklearn models)
+        try:
+            if hasattr(self.model, 'cluster_centers_'):
+                # K-Means: cluster centers
+                total_bytes += self.model.cluster_centers_.nbytes
+            
+            if hasattr(self.model, 'labels_'):
+                # All clustering models: labels
+                total_bytes += self.model.labels_.nbytes
+            
+            if hasattr(self.model, 'means_'):
+                # GMM: means
+                total_bytes += self.model.means_.nbytes
+            
+            if hasattr(self.model, 'covariances_'):
+                # GMM: covariances
+                total_bytes += self.model.covariances_.nbytes
+            
+            if hasattr(self.model, 'weights_'):
+                # GMM: mixture weights
+                total_bytes += self.model.weights_.nbytes
+            
+            if hasattr(self.model, 'precisions_'):
+                # GMM: precisions
+                total_bytes += self.model.precisions_.nbytes
+            
+            if hasattr(self.model, 'precisions_cholesky_'):
+                # GMM: Cholesky decomposition
+                total_bytes += self.model.precisions_cholesky_.nbytes
+            
+        except Exception as e:
+            # If any attribute access fails, continue
+            pass
+        
+        # 3. Cached training data (for Hierarchical Clustering)
+        if self.X_train_ is not None:
+            total_bytes += self.X_train_.nbytes
+        
+        if self.train_cluster_labels_ is not None:
+            total_bytes += self.train_cluster_labels_.nbytes
+        
+        # 4. Cluster-to-class mapping
+        if self.cluster_to_class_map_ is not None:
+            total_bytes += sys.getsizeof(self.cluster_to_class_map_)
+            # Add size of keys and values
+            for k, v in self.cluster_to_class_map_.items():
+                total_bytes += sys.getsizeof(k) + sys.getsizeof(v)
+        
+        # Convert to MB
+        return total_bytes / (1024 * 1024)
+    
+    def get_detailed_memory_info(self):
+        """
+        Get detailed breakdown of memory usage for debugging/analysis.
+        
+        Returns:
+            Dict with memory breakdown by component
+        """
+        memory_info = {
+            'total_mb': 0,
+            'model_base_mb': 0,
+            'cluster_centers_mb': 0,
+            'training_cache_mb': 0,
+            'labels_mb': 0,
+            'mapping_mb': 0,
+            'gmm_params_mb': 0
+        }
+        
+        # Model base
+        memory_info['model_base_mb'] = sys.getsizeof(self.model) / (1024 * 1024)
+        
+        # Cluster centers (K-Means)
+        if hasattr(self.model, 'cluster_centers_'):
+            memory_info['cluster_centers_mb'] = self.model.cluster_centers_.nbytes / (1024 * 1024)
+        
+        # Labels
+        if hasattr(self.model, 'labels_'):
+            memory_info['labels_mb'] = self.model.labels_.nbytes / (1024 * 1024)
+        
+        # Training cache (Hierarchical)
+        if self.X_train_ is not None:
+            cache_bytes = self.X_train_.nbytes
+            if self.train_cluster_labels_ is not None:
+                cache_bytes += self.train_cluster_labels_.nbytes
+            memory_info['training_cache_mb'] = cache_bytes / (1024 * 1024)
+        
+        # GMM parameters
+        if hasattr(self.model, 'means_'):
+            gmm_bytes = self.model.means_.nbytes
+            if hasattr(self.model, 'covariances_'):
+                gmm_bytes += self.model.covariances_.nbytes
+            if hasattr(self.model, 'weights_'):
+                gmm_bytes += self.model.weights_.nbytes
+            memory_info['gmm_params_mb'] = gmm_bytes / (1024 * 1024)
+        
+        # Mapping
+        if self.cluster_to_class_map_ is not None:
+            map_bytes = sys.getsizeof(self.cluster_to_class_map_)
+            for k, v in self.cluster_to_class_map_.items():
+                map_bytes += sys.getsizeof(k) + sys.getsizeof(v)
+            memory_info['mapping_mb'] = map_bytes / (1024 * 1024)
+        
+        # Total
+        memory_info['total_mb'] = sum(v for k, v in memory_info.items() if k != 'total_mb')
+        
+        return memory_info
         
 
 
@@ -381,15 +498,15 @@ class Task4MultiClassDetection:
                     linkage='ward'
                 )
             ),
-            # 'Spectral': MultiClassDetector(
-            #     'Spectral',
-            #     SpectralClustering(
-            #         n_clusters=5,
-            #         random_state=42,
-            #         affinity='rbf',
-            #         n_init=10
-            #     )
-            # )
+            'Spectral': MultiClassDetector(
+                'Spectral',
+                SpectralClustering(
+                    n_clusters=5,
+                    random_state=42,
+                    affinity='rbf',
+                    n_init=10
+                )
+            )
         }
         
         return models
@@ -429,7 +546,9 @@ class Task4MultiClassDetection:
         }
     
     def train_and_evaluate(self, X_train, y_train, X_test, y_test):
-        """Train and evaluate all models."""
+        """
+        Train and evaluate all models - IMPROVED WITH BETTER ERROR HANDLING.
+        """
         print(f"\n{'='*70}")
         print(f"TRAINING AND EVALUATING MODELS")
         print(f"{'='*70}")
@@ -438,6 +557,9 @@ class Task4MultiClassDetection:
         results = []
         all_predictions = {}
         all_mappings = {}
+        
+        # Track failures
+        failed_models = []
         
         for model_name, model in models.items():
             print(f"\n{'-'*60}")
@@ -464,6 +586,11 @@ class Task4MultiClassDetection:
                 print(f"\n  Evaluating on test set...")
                 metrics = self.evaluate_model(model, X_test, y_test)
                 all_predictions[model_name] = model.predict(X_test)
+                
+                # Validate predictions
+                pred_unique = np.unique(all_predictions[model_name])
+                if len(pred_unique) < 2:
+                    print(f"  ⚠️  WARNING: Model predicts only {len(pred_unique)} unique classes!")
                 
                 # Store results
                 result = {
@@ -493,48 +620,81 @@ class Task4MultiClassDetection:
                 # Print per-class F1
                 print(f"\n  Per-class F1-Scores:")
                 for i, class_name in enumerate(self.class_names):
-                    print(f"    {class_name:12s}: {metrics['f1_per_class'][i]:.4f}")
+                    f1_val = metrics['f1_per_class'][i]
+                    # Highlight poor performance
+                    warning = " ⚠️" if f1_val < 0.1 else ""
+                    print(f"    {class_name:12s}: {f1_val:.4f}{warning}")
+                
+                # Print memory info
+                print(f"\n  Resource Usage:")
+                print(f"    Memory: {metrics['memory_mb']:.2f} MB")
+                print(f"    Inference: {metrics['inference_time_ms']:.4f} ms/sample")
                 
                 # Save model
                 import joblib
                 model_path = self.model_dir / f"{model_name.lower().replace(' ', '_')}.pkl"
                 joblib.dump(model.model, model_path)
+                print(f"    Saved model: {model_path.name}")
                 
                 # Save mapping
                 mapping_path = self.model_dir / f"{model_name.lower().replace(' ', '_')}_mapping.pkl"
                 joblib.dump(model.cluster_to_class_map_, mapping_path)
+                print(f"    Saved mapping: {mapping_path.name}")
+                
+                print(f"\n  ✓ {model_name} completed successfully")
                 
             except Exception as e:
-                print(f"  ERROR: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                print(f"\n  ✗ ERROR in {model_name}: {str(e)}")
+                print(f"\n  Stack trace:")
+                # traceback.print_exc()
+                failed_models.append(model_name)
                 continue
+        
+        # Summary of failures
+        if failed_models:
+            print(f"\n{'='*70}")
+            print(f"⚠️  WARNING: {len(failed_models)} model(s) failed:")
+            for model_name in failed_models:
+                print(f"    - {model_name}")
+            print(f"{'='*70}")
+        
+        if len(results) == 0:
+            raise RuntimeError("All models failed! Check error messages above.")
         
         return pd.DataFrame(results), all_predictions, all_mappings
     
     def visualize_results(self, results_df: pd.DataFrame, X_test, y_test, 
                      all_predictions, all_mappings):
         """
-        Create comprehensive visualizations.
+        Create comprehensive visualizations - IMPROVED VERSION.
         
-        FIXED: Now correctly generates both confusion matrices AND cluster mappings.
+        Now with clear separation of concerns and no duplicates:
+        - Confusion matrices = prediction performance
+        - Cluster mappings = interpretability/explainability
         """
         print("\n  Generating visualizations...")
         
-        # 1. Macro metrics comparison
+        # 1. Performance Overview: Macro metrics comparison
+        print("    → Macro metrics comparison...")
         self.plot_macro_metrics(results_df)
         
-        # 2. Per-class F1 scores heatmap
+        # 2. Performance Detail: Per-class F1 scores heatmap
+        print("    → Per-class F1 heatmap...")
         self.plot_per_class_heatmap(results_df)
         
-        # 3. ACTUAL confusion matrices showing prediction performance
+        # 3. Performance Analysis: Confusion matrices (shows prediction accuracy)
+        print("    → Confusion matrices (prediction performance)...")
         self.plot_confusion_matrices(y_test, all_predictions, all_mappings)
         
-        # 4. Cluster-to-class mapping visualization (for interpretability)
+        # 4. Interpretability: Cluster-to-class mappings (shows how clusters map to classes)
+        print("    → Cluster mappings (interpretability)...")
         self.plot_cluster_mappings(all_mappings)
         
-        # 5. t-SNE projections
+        # 5. Dimensionality Reduction: t-SNE projections
+        print("    → t-SNE projections...")
         self.plot_tsne_projections(X_test, y_test, all_predictions, results_df)
+        
+        print("    ✓ All visualizations complete")
     
     def plot_macro_metrics(self, results_df: pd.DataFrame):
         """Plot macro-averaged metrics comparison."""
@@ -720,7 +880,7 @@ class Task4MultiClassDetection:
         plt.close(fig)
 
     def generate_summary(self, results_df: pd.DataFrame):
-        """Generate comprehensive summary."""
+        """Generate comprehensive summary - FIXED for lowercase class names."""
         print(f"\n{'='*70}")
         print(f"MULTI-CLASS DETECTION SUMMARY ({self.mode.upper()} MODE)")
         print(f"{'='*70}")
@@ -731,7 +891,7 @@ class Task4MultiClassDetection:
         # Display main results
         print("\nModel Comparison (Macro-Averaged Metrics):")
         display_cols = ['Model', 'Accuracy', 'Precision (Macro)', 
-                       'Recall (Macro)', 'F1-Score (Macro)']
+                    'Recall (Macro)', 'F1-Score (Macro)']
         print(results_df[display_cols].to_string(index=False))
         
         # Display per-class F1 scores
@@ -759,6 +919,7 @@ class Task4MultiClassDetection:
         print(f"Recall:         {best_model['Recall (Macro)']:.4f}")
         print(f"\nPer-Class F1-Scores:")
         for class_name in self.class_names:
+            # FIXED: Use lowercase class_name directly (no capitalization)
             print(f"  {class_name:12s}: {best_model[f'F1_{class_name}']:.4f}")
         
         # Identify which classes are hardest to detect
@@ -767,6 +928,7 @@ class Task4MultiClassDetection:
         print(f"{'='*70}")
         
         for class_name in self.class_names:
+            # FIXED: Use lowercase class_name directly
             col = f'F1_{class_name}'
             avg_f1 = results_df[col].mean()
             std_f1 = results_df[col].std()
@@ -787,6 +949,7 @@ class Task4MultiClassDetection:
         # Find most consistent model (lowest std across classes)
         consistency_scores = {}
         for _, row in results_df.iterrows():
+            # FIXED: Use lowercase class names
             per_class_f1 = [row[f'F1_{name}'] for name in self.class_names]
             consistency_scores[row['Model']] = np.std(per_class_f1)
         
@@ -925,23 +1088,7 @@ def run_task4(config: Dict[str, Any], logger=None) -> Dict:
     """
     Execute Task 4: Multi-Class Intrusion Detection.
     
-    Performs unsupervised multi-class classification to distinguish between
-    Normal traffic and four attack types (Injection, Masquerade, Poisoning, Replay).
-    
-    Args:
-        config: Configuration dictionary with data paths and settings
-        logger: Optional W&B logger for experiment tracking
-    
-    Returns:
-        Dictionary containing results for both 'core' and 'full' modes:
-        {
-            'core': {
-                'summary': DataFrame with model comparison metrics,
-                'predictions': Dict of predictions per model,
-                'mappings': Dict of cluster-to-class mappings per model
-            },
-            'full': { ... same structure ... }
-        }
+    FIXED: Final summary now uses lowercase class names.
     """
     results = {}
     
@@ -1021,6 +1168,16 @@ def run_task4(config: Dict[str, Any], logger=None) -> Dict:
     print(f"  CORE mode best F1-Macro: {results['core']['summary'].iloc[0]['F1-Score (Macro)']:.4f}")
     print(f"  FULL mode best F1-Macro: {results['full']['summary'].iloc[0]['F1-Score (Macro)']:.4f}")
     
+    print("\nPer-class performance (best models):")
+    class_names = ['normal', 'injection', 'masquerade', 'poisoning', 'replay']
+    
+    for mode in ['core', 'full']:
+        best = results[mode]['summary'].iloc[0]
+        print(f"\n  {mode.upper()} mode ({best['Model']}):")
+        for class_name in class_names:
+            f1_score = best[f'F1_{class_name}']
+            print(f"    {class_name:12s}: {f1_score:.4f}")
+    
     print("\nResults saved to:")
     print("  - outputs/figures/task4_core/ and outputs/tables/task4_core/")
     print("  - outputs/figures/task4_full/ and outputs/tables/task4_full/")
@@ -1042,7 +1199,7 @@ if __name__ == '__main__':
     print("  Perform unsupervised multi-class classification to distinguish")
     print("  between Normal traffic and four attack types using clustering.")
     print("\nApproach:")
-    print("  1. Train clustering models (K-Means, GMM, Hierarchical, Spectral)")
+    print("  1. Train clustering models (K-Means, GMM, Hierarchical)")
     print("  2. Learn cluster-to-class mappings using Hungarian algorithm")
     print("  3. Evaluate using macro-averaged Precision, Recall, F1-score")
     print("  4. Analyze per-class performance and confusion matrices")
@@ -1070,6 +1227,8 @@ if __name__ == '__main__':
     print("FINAL RESULTS SUMMARY")
     print("="*70)
     
+    class_names = ['normal', 'injection', 'masquerade', 'poisoning', 'replay']
+    
     for mode in ['core', 'full']:
         print(f"\n{mode.upper()} Mode:")
         summary = results[mode]['summary']
@@ -1080,11 +1239,8 @@ if __name__ == '__main__':
         print(f"  Accuracy: {best['Accuracy']:.4f}")
         print(f"  Train Time: {best['Train Time (s)']:.2f}s")
         print(f"\n  Per-Class F1-Scores:")
-        print(f"    Normal:      {best['F1_Normal']:.4f}")
-        print(f"    Injection:   {best['F1_Injection']:.4f}")
-        print(f"    Masquerade:  {best['F1_Masquerade']:.4f}")
-        print(f"    Poisoning:   {best['F1_Poisoning']:.4f}")
-        print(f"    Replay:      {best['F1_Replay']:.4f}")
+        for class_name in class_names:
+            print(f"    {class_name:12s}: {best[f'F1_{class_name}']:.4f}")
     
     print("\n" + "="*70)
     print("Task 4 execution completed successfully!")
