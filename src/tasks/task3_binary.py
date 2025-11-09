@@ -293,108 +293,66 @@ class Task3BinaryDetection:
         
         return models
     
-    def balance_combined_test_set(self, test_df: pd.DataFrame,
-                              strategy: str = 'equal_per_attack',
-                              random_state: int = 42,
-                              allow_replacement: bool = False) -> pd.DataFrame:
+    def balance_combined_test_set(self, test_df: pd.DataFrame, strategy='equal_attacks'):
         """
-        Balanced test set where each attack_type contributes:
-        - n_pos attack rows and n_pos normal rows (parity within each attack type).
-
+        Balance the combined test set by keeping all normal data and balancing attack data.
+        
         Args:
-            test_df: must contain 'attack_type' and 'attack' (0/1) columns.
-            strategy: currently supports 'equal_per_attack' (recommended) and a simple 'downsample_majority' fallback.
-            random_state: reproducible sampling seed.
-            allow_replacement: if True, sampling will use replacement when a group is too small.
-
+            test_df: Test dataframe with 'attack' (0/1) and 'attack_type' columns
+            strategy: 'equal_attacks' - equal attack samples per type, keep all normals
+        
         Returns:
-            balanced_df: shuffled DataFrame with equal (attack, normal) counts per attack_type.
+            Balanced test dataframe
         """
-        if 'attack_type' not in test_df.columns:
-            raise KeyError("test_df must contain 'attack_type' column")
-        if 'attack' not in test_df.columns:
-            raise KeyError("test_df must contain 'attack' column (0/1)")
-
-        rng = np.random.RandomState(random_state)
         print(f"\n  Balancing test set (strategy: {strategy})...")
-
-        # count positives per attack_type
-        pos_counts = test_df[test_df['attack'] == 1].groupby('attack_type').size()
-        if pos_counts.empty:
-            raise ValueError("No positive (attack==1) samples found in test_df")
-
-        if strategy == 'equal_per_attack':
-            n_pos = int(pos_counts.min())  # number of positive samples to take per attack_type
-            if n_pos < 1:
-                raise ValueError("Insufficient positive samples to build balanced set")
-
-            parts = []
-            for atype in pos_counts.index:
-                attacks_of_type = test_df[(test_df['attack_type'] == atype) & (test_df['attack'] == 1)]
-                replace_att = allow_replacement and (len(attacks_of_type) < n_pos)
-                sampled_attacks = attacks_of_type.sample(n=n_pos, replace=replace_att,
-                                                        random_state=rng.randint(0, 2**31-1))
-
-                normals_same = test_df[(test_df['attack_type'] == atype) & (test_df['attack'] == 0)]
-                if len(normals_same) >= n_pos:
-                    sampled_normals = normals_same.sample(n=n_pos, replace=False,
-                                                        random_state=rng.randint(0, 2**31-1))
-                else:
-                    # fallback: sample normals from global pool (avoid running out)
-                    normals_global = test_df[test_df['attack'] == 0]
-                    replace_norm = allow_replacement and (len(normals_global) < n_pos)
-                    sampled_normals = normals_global.sample(n=n_pos, replace=replace_norm,
-                                                            random_state=rng.randint(0, 2**31-1))
-
-                parts.append(pd.concat([sampled_attacks, sampled_normals], ignore_index=True))
-
-            balanced_df = pd.concat(parts, ignore_index=True)
-
-        elif strategy == 'downsample_majority':
-            # Simple fallback: limit largest group(s) so distribution is less dominated
-            # Here we downsample each attack_type to median count and then ensure parity by sampling normals per-type similarly.
-            median_total = int(test_df['attack_type'].value_counts().median())
-            parts = []
-            for atype in test_df['attack_type'].unique():
-                grp = test_df[test_df['attack_type'] == atype]
-                # pick positives up to median_total (or less)
-                pos_grp = grp[grp['attack'] == 1]
-                neg_grp = grp[grp['attack'] == 0]
-                n_pos = min(len(pos_grp), median_total)
-                if n_pos == 0:
-                    continue
-                replace_pos = allow_replacement and (len(pos_grp) < n_pos)
-                sampled_pos = pos_grp.sample(n=n_pos, replace=replace_pos, random_state=rng.randint(0, 2**31-1))
-
-                if len(neg_grp) >= n_pos:
-                    sampled_neg = neg_grp.sample(n=n_pos, replace=False, random_state=rng.randint(0, 2**31-1))
-                else:
-                    normals_global = test_df[test_df['attack'] == 0]
-                    replace_norm = allow_replacement and (len(normals_global) < n_pos)
-                    sampled_neg = normals_global.sample(n=n_pos, replace=replace_norm, random_state=rng.randint(0, 2**31-1))
-
-                parts.append(pd.concat([sampled_pos, sampled_neg], ignore_index=True))
-
-            if not parts:
-                raise ValueError("No groups available to downsample")
-            balanced_df = pd.concat(parts, ignore_index=True)
-
+        
+        # Separate normal and attack data
+        normal_df = test_df[test_df['attack'] == 0].copy()
+        attack_df = test_df[test_df['attack'] == 1].copy()
+        
+        print(f"  Original distribution:")
+        print(f"    Normal: {len(normal_df)}")
+        
+        # Get attack type distribution (only for attacks)
+        attack_counts = attack_df['attack_type'].value_counts()
+        for attack_type, count in attack_counts.items():
+            print(f"    {attack_type} attacks: {count}")
+        
+        if strategy == 'equal_attacks':
+            # Sample equal number from each attack type (use minimum count)
+            min_attack_count = attack_counts.min()
+            print(f"\n  Sampling {min_attack_count} samples from each attack type...")
+            
+            balanced_attack_dfs = []
+            for attack_type in attack_counts.index:
+                attack_type_df = attack_df[attack_df['attack_type'] == attack_type]
+                sampled_df = attack_type_df.sample(n=min_attack_count, random_state=42)
+                balanced_attack_dfs.append(sampled_df)
+            
+            balanced_attack_df = pd.concat(balanced_attack_dfs, ignore_index=True)
+            
+            # Combine all normals with balanced attacks
+            balanced_df = pd.concat([normal_df, balanced_attack_df], ignore_index=True)
+        
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
-
-        # shuffle final DF
-        balanced_df = balanced_df.sample(frac=1, random_state=rng.randint(0, 2**31-1)).reset_index(drop=True)
-
-        # debug print
-        print("  Balanced distribution (per attack_type):")
-        for at, cnt in balanced_df['attack_type'].value_counts().items():
-            print(f"    {at}: {cnt} rows (should be 2 * n_pos for equal_per_attack)")
-        print(f"  Total: {len(test_df)} -> {len(balanced_df)}")
-
+        
+        # Shuffle the balanced dataset
+        balanced_df = balanced_df.sample(frac=1, random_state=42).reset_index(drop=True)
+        
+        # Print new distribution
+        print(f"\n  Balanced distribution:")
+        print(f"    Normal: {len(balanced_df[balanced_df['attack'] == 0])}")
+        new_attack_counts = balanced_df[balanced_df['attack'] == 1]['attack_type'].value_counts()
+        for attack_type, count in new_attack_counts.items():
+            print(f"    {attack_type} attacks: {count}")
+        print(f"  Total samples: {len(test_df)} -> {len(balanced_df)}")
+        print(f"  Attack ratio: {balanced_df['attack'].mean():.3f}")
+        
         return balanced_df
 
     
-    def evaluate_model(self, model: BinaryDetector, X_test, y_test):
+    def evaluate_model(self, model: BinaryDetector, X_test, y_test, is_combined_imbalanced=False):
         """Evaluate a single model."""
         y_pred = model.predict(X_test)
         
@@ -406,19 +364,40 @@ class Task3BinaryDetection:
         accuracy = accuracy_score(y_test, y_pred)
         precision = precision_score(y_test, y_pred, zero_division=0)
         recall = recall_score(y_test, y_pred, zero_division=0)
-        f1 = f1_score(y_test, y_pred, zero_division=0)
-        cm = confusion_matrix(y_test, y_pred)
         
-        return {
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1,
-            'confusion_matrix': cm,
-            'train_time': model.train_time,
-            'inference_time_ms': model.inference_time * 1000,
-            'memory_mb': model.get_memory_mb()
-        }
+        # Calculate F1 scores
+        if is_combined_imbalanced:
+            # For combined imbalanced dataset, calculate all F1 variants
+            f1_binary = f1_score(y_test, y_pred, average='binary', zero_division=0)
+            f1_macro = f1_score(y_test, y_pred, average='macro', zero_division=0)
+            f1_weighted = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+            
+            return {
+                'accuracy': accuracy,
+                'precision': precision,
+                'recall': recall,
+                'f1_score': f1_binary, 
+                'f1_macro': f1_macro,
+                'f1_weighted': f1_weighted,
+                'confusion_matrix': confusion_matrix(y_test, y_pred),
+                'train_time': model.train_time,
+                'inference_time_ms': model.inference_time * 1000,
+                'memory_mb': model.get_memory_mb()
+            }
+        else:
+            # For per-attack or balanced evaluation, use binary F1
+            f1 = f1_score(y_test, y_pred, zero_division=0)
+            
+            return {
+                'accuracy': accuracy,
+                'precision': precision,
+                'recall': recall,
+                'f1_score': f1,
+                'confusion_matrix': confusion_matrix(y_test, y_pred),
+                'train_time': model.train_time,
+                'inference_time_ms': model.inference_time * 1000,
+                'memory_mb': model.get_memory_mb()
+            }
     
     def train_and_evaluate_attack(self, attack_type: str, X_train, y_train, X_test, y_test):
         """Train and evaluate all models for a specific attack type."""
@@ -734,98 +713,71 @@ class Task3BinaryDetection:
             self.logger.log_figure(fig, f"task3_{self.mode}/cross_attack_heatmap")
         plt.close(fig)
 
-    def train_and_evaluate_combined(self, X_train, y_train, X_test, y_test,
-                                test_df: pd.DataFrame, scaler, features,
-                                balance_strategy: str = 'equal_per_attack'):
-        """
-        Train and evaluate all models on combined dataset with balanced evaluation.
-
-        Returns:
-            results_df, all_predictions, balanced_test_df, X_balanced_scaled, y_balanced
-        all_predictions will be a dict: { model_name: {'imbalanced': arr, 'balanced': arr} }
-        """
+    def train_and_evaluate_combined(self, X_train, y_train, X_test, y_test, 
+                           test_df, scaler, features):
+        """Train and evaluate all models on combined dataset with balanced evaluation."""
         print(f"\n{'='*70}")
         print(f"TRAINING MODELS ON COMBINED DATASET")
         print(f"{'='*70}")
-
+        
         # Calculate contamination based on actual attack ratio
         contamination = max(0.01, min(0.5, y_train.mean()))
         print(f"Using contamination={contamination:.3f} (attack ratio: {y_train.mean():.3f})")
-
+        
         models = self.create_models(contamination=contamination)
         results = []
         all_predictions = {}
-
-        # We'll create the balanced test DF once (so all models evaluate on the SAME balanced sample)
-        balanced_test_df = self.balance_combined_test_set(test_df, strategy=balance_strategy)
-
-        # Build balanced arrays and scaled version once
-        features_present = [c for c in features if c in balanced_test_df.columns]
-        if not features_present:
-            raise RuntimeError("No feature columns found in balanced test_df. Check `features` list.")
-
-        X_balanced = balanced_test_df[features_present].values
-        y_balanced = balanced_test_df['attack'].values
-
-        X_balanced_scaled = scaler.transform(X_balanced)
-        X_balanced_scaled = np.nan_to_num(X_balanced_scaled, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Iterate models
+        
         for model_name, model in models.items():
             print(f"\n{'-'*60}")
             print(f"Model: {model_name}")
             print(f"{'-'*60}")
-
-            # prepare storage shape placeholders
-            all_predictions[model_name] = {'imbalanced': None, 'balanced': None}
-
+            
             try:
                 # Train
                 print(f"  Training...")
                 model.fit(X_train)
                 print(f"  Training time: {model.train_time:.2f}s")
-
+                
                 # Evaluate on IMBALANCED test set (for reference)
                 print(f"  Evaluating on imbalanced test set...")
-                try:
-                    y_pred_imbalanced = model.predict(X_test)
-                except Exception as e:
-                    print(f"  WARNING: model.predict failed on imbalanced X_test: {e}")
-                    y_pred_imbalanced = np.zeros(len(X_test), dtype=int)
-
-                metrics_imbalanced = self.evaluate_model(model, X_test, y_test)
-                all_predictions[model_name]['imbalanced'] = y_pred_imbalanced
-
+                y_pred_imbalanced = model.predict(X_test)
+                metrics_imbalanced = self.evaluate_model(model, X_test, y_test, is_combined_imbalanced=True)
+                all_predictions[model_name] = y_pred_imbalanced
+                
                 print(f"  Imbalanced Results:")
                 print(f"    Accuracy:  {metrics_imbalanced['accuracy']:.4f}")
                 print(f"    Precision: {metrics_imbalanced['precision']:.4f}")
                 print(f"    Recall:    {metrics_imbalanced['recall']:.4f}")
-                print(f"    F1-Score:  {metrics_imbalanced['f1_score']:.4f}")
-
-                # Evaluate on BALANCED test set (the same balanced_test_df for all models)
-                print(f"\n  Evaluating on balanced test set (strategy={balance_strategy})...")
-                try:
-                    y_pred_balanced = model.predict(X_balanced_scaled)
-                except Exception as e:
-                    print(f"  WARNING: model.predict failed on balanced X: {e}")
-                    y_pred_balanced = np.zeros(len(X_balanced_scaled), dtype=int)
-
-                all_predictions[model_name]['balanced'] = y_pred_balanced
-
+                print(f"    F1-Binary: {metrics_imbalanced['f1_score']:.4f}")
+                print(f"    F1-Macro:  {metrics_imbalanced['f1_macro']:.4f}")
+                print(f"    F1-Weighted: {metrics_imbalanced['f1_weighted']:.4f}")
+                                
+                # Evaluate on BALANCED test set
+                print(f"\n  Evaluating on balanced test set...")
+                balanced_test_df = self.balance_combined_test_set(test_df, strategy='equal_attacks')
+                
+                X_balanced = balanced_test_df[features].values
+                y_balanced = balanced_test_df['attack'].values
+                X_balanced_scaled = scaler.transform(X_balanced)
+                X_balanced_scaled = np.nan_to_num(X_balanced_scaled, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                y_pred_balanced = model.predict(X_balanced_scaled)
+                
                 balanced_metrics = {
                     'accuracy': accuracy_score(y_balanced, y_pred_balanced),
                     'precision': precision_score(y_balanced, y_pred_balanced, zero_division=0),
                     'recall': recall_score(y_balanced, y_pred_balanced, zero_division=0),
                     'f1_score': f1_score(y_balanced, y_pred_balanced, zero_division=0)
                 }
-
+                
                 print(f"  Balanced Results:")
                 print(f"    Accuracy:  {balanced_metrics['accuracy']:.4f}")
                 print(f"    Precision: {balanced_metrics['precision']:.4f}")
                 print(f"    Recall:    {balanced_metrics['recall']:.4f}")
                 print(f"    F1-Score:  {balanced_metrics['f1_score']:.4f}")
-
-                # Store results (balanced metrics used as primary)
+                
+                # Store results (using balanced metrics as primary)
                 result = {
                     'Attack': 'Combined',
                     'Model': model_name,
@@ -836,32 +788,30 @@ class Task3BinaryDetection:
                     'Train Time (s)': metrics_imbalanced['train_time'],
                     'Inference Time (ms)': metrics_imbalanced['inference_time_ms'],
                     'Memory (MB)': metrics_imbalanced['memory_mb'],
-                    # Also store imbalanced metrics for reference
+                    # Store all imbalanced metrics for reference
                     'Imbalanced_Accuracy': metrics_imbalanced['accuracy'],
                     'Imbalanced_Precision': metrics_imbalanced['precision'],
                     'Imbalanced_Recall': metrics_imbalanced['recall'],
-                    'Imbalanced_F1': metrics_imbalanced['f1_score']
+                    'Imbalanced_F1_Binary': metrics_imbalanced['f1_score'],
+                    'Imbalanced_F1_Macro': metrics_imbalanced['f1_macro'],
+                    'Imbalanced_F1_Weighted': metrics_imbalanced['f1_weighted']
                 }
                 results.append(result)
-
-                # Save model artifact
+                
+                # Save model
                 import joblib
                 combined_model_dir = self.model_dir / 'combined'
                 combined_model_dir.mkdir(exist_ok=True)
                 model_path = combined_model_dir / f"{model_name.lower().replace(' ', '_')}.pkl"
                 joblib.dump(model.model, model_path)
-
+                
             except Exception as e:
                 print(f"  ERROR: {str(e)}")
                 import traceback
                 traceback.print_exc()
-                # ensure missing preds remain None to detect later
-                all_predictions[model_name] = all_predictions.get(model_name, {'imbalanced': None, 'balanced': None})
                 continue
-
-        results_df = pd.DataFrame(results)
-        # Return balanced test artifacts so caller and visualizer can use them
-        return results_df, all_predictions, balanced_test_df, X_balanced_scaled, y_balanced
+        
+        return pd.DataFrame(results), all_predictions
 
     
     def visualize_combined_results(self, results_df: pd.DataFrame, X_test, y_test, all_predictions):
@@ -919,7 +869,8 @@ class Task3BinaryDetection:
         
         print(f"\nImbalanced Test Set Reference:")
         imbalanced_cols = ['Model', 'Imbalanced_Accuracy', 'Imbalanced_Precision', 
-                        'Imbalanced_Recall', 'Imbalanced_F1']
+                        'Imbalanced_Recall', 'Imbalanced_F1_Binary', 
+                        'Imbalanced_F1_Macro', 'Imbalanced_F1_Weighted']
         print(results_df[imbalanced_cols].to_string(index=False))
         
         # Save to CSV
@@ -931,7 +882,9 @@ class Task3BinaryDetection:
         print(f"\nBest Model for Combined Dataset: {best_model['Model']}")
         print(f"  F1-Score (Balanced): {best_model['F1-Score']:.4f}")
         print(f"  Accuracy (Balanced): {best_model['Accuracy']:.4f}")
-        print(f"  F1-Score (Imbalanced): {best_model['Imbalanced_F1']:.4f}")
+        print(f"  F1-Binary (Imbalanced): {best_model['Imbalanced_F1_Binary']:.4f}")
+        print(f"  F1-Macro (Imbalanced): {best_model['Imbalanced_F1_Macro']:.4f}")
+        print(f"  F1-Weighted (Imbalanced): {best_model['Imbalanced_F1_Weighted']:.4f}")
         
         return results_df
 
@@ -986,49 +939,37 @@ def run_task3(config: Dict[str, Any], logger=None) -> Dict:
             
             print(f"\n✓ Completed {attack_type} attack analysis")
         
-        # ===== COMBINED TRAINING =====
+        # ===== COMBINED DATASET TRAINING =====
         print(f"\n{'*'*70}")
-        print("* PART 2: COMBINED TRAINING")
+        print(f"* PROCESSING COMBINED DATASET")
         print(f"{'*'*70}")
-
-        # Load combined datasets (returns combined_train, combined_test DataFrames)
+        
+        # Load combined data
+        print("\nLoading combined dataset...")
         train_combined, test_combined = load_combined_datasets(
             Path(config['data']['raw_dir']),
             config['data']['train_files'],
             config['data']['test_files'],
             mode=mode
         )
-
-        # Preprocess combined data to get X_train_comb, y_train_comb, scaled X_test_comb etc.
+        
+        # Preprocess combined data
         X_train_comb, y_train_comb, X_test_comb, y_test_comb, features_comb, scaler_comb = \
             task3.preprocess_attack_data(train_combined, test_combined, 'combined')
-
-        # Train & evaluate on combined dataset — returns balanced test artifacts as well
-        results_df_comb, all_predictions_comb, balanced_df_comb, X_bal_scaled, y_bal = \
-            task3.train_and_evaluate_combined(
-                X_train_comb, y_train_comb, X_test_comb, y_test_comb,
-                test_combined, scaler_comb, features_comb, balance_strategy='equal_per_attack'
-            )
-
-        # Build a dict mapping model -> balanced predictions (visualizer expects predictions aligned with X_bal_scaled)
-        all_predictions_balanced = {}
-        for model_name, preds in all_predictions_comb.items():
-            if isinstance(preds, dict) and preds.get('balanced') is not None:
-                all_predictions_balanced[model_name] = preds['balanced']
-            elif isinstance(preds, np.ndarray) and len(preds) == len(X_bal_scaled):
-                all_predictions_balanced[model_name] = preds
-            else:
-                # fallback: attempt to predict now on the balanced X
-                try:
-                    # If you have the model object saved in disk one could reload; here we try to skip
-                    print(f"Warning: No balanced preds for {model_name}; skipping projection for this model.")
-                except Exception:
-                    pass
-
-        # Visualize using the BALANCED arrays (so plots match balanced metrics)
-        task3.visualize_combined_results(
-            results_df_comb, X_bal_scaled, y_bal, all_predictions_balanced
+        
+        # Train and evaluate on combined dataset
+        results_df_comb, all_predictions_comb = task3.train_and_evaluate_combined(
+            X_train_comb, y_train_comb, X_test_comb, y_test_comb,
+            test_combined,  # Pass the full test DataFrame
+            scaler_comb,    # Pass the scaler
+            features_comb   # Pass the feature names
         )
+        
+        # Visualize combined results
+        task3.visualize_combined_results(
+            results_df_comb, X_test_comb, y_test_comb, all_predictions_comb
+        )
+        
         # Generate combined dataset summary
         results_df_comb = task3.generate_combined_summary(results_df_comb)
         

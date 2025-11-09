@@ -527,7 +527,6 @@ def load_combined_datasets_multiclass(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Load and combine all attack datasets for MULTI-CLASS detection (Task 4).
-    
     Key difference from load_combined_datasets():
     - Normal samples (attack=0) are labeled as 'Normal' regardless of source dataset
     - Attack samples (attack=1) are labeled with their specific attack type
@@ -543,13 +542,14 @@ def load_combined_datasets_multiclass(
     Returns:
         Tuple of (combined_train_df, combined_test_df) with 'attack_type' column
         containing multi-class labels
+    FIXED: Now returns lowercase labels to match Task 4 expectations.
     """
     data_dir = Path(data_dir)
     train_dfs = []
     test_dfs = []
     
     print("\nLoading datasets for multi-class detection...")
-    print("(Normal samples will be labeled as 'Normal', attacks by their type)")
+    print("(Normal samples will be labeled as 'normal', attacks by their type)")
     
     for attack_type in train_files.keys():
         print(f"\n  Loading {attack_type} dataset...")
@@ -576,6 +576,8 @@ def load_combined_datasets_multiclass(
         test_df = test_df[keep_test].copy()
         
         # Apply preprocessing
+        from src.preprocessing import preprocess_dataframe, standardize_schema, engineer_features
+        
         train_df = preprocess_dataframe(train_df)
         train_df = standardize_schema(train_df)
         test_df = preprocess_dataframe(test_df)
@@ -602,13 +604,11 @@ def load_combined_datasets_multiclass(
         print(f"    Train: {len(train_normal)} normal, {len(train_attack)} attack")
         print(f"    Test:  {len(test_normal)} normal, {len(test_attack)} attack")
         
-        # Label samples for multi-class classification
-        # Normal samples -> 'Normal' (capitalized to match attack type format)
-        train_normal['attack_type'] = 'Normal'
-        test_normal['attack_type'] = 'Normal'
+        train_normal['attack_type'] = 'normal'
+        test_normal['attack_type'] = 'normal'
         
-        # Attack samples -> specific attack type (capitalize first letter)
-        attack_label = attack_type.capitalize()
+        # Attack samples -> specific attack type (lowercase)
+        attack_label = attack_type.lower()  # FIXED: Changed from .capitalize() to .lower()
         train_attack['attack_type'] = attack_label
         test_attack['attack_type'] = attack_label
         
@@ -684,7 +684,7 @@ def load_combined_datasets_multiclass(
     if not all_correct:
         print(f"\n  ✗ WARNING: Distributions don't match expected values!")
         print(f"     Check that 'attack' column uses 0=normal, 1=attack encoding")
-    
+
     print(f"{'='*70}\n")
     
     return combined_train, combined_test
