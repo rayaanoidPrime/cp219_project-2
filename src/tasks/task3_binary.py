@@ -121,8 +121,14 @@ class Task3BinaryDetection:
         print(f"RUNNING TASK 3 IN '{mode.upper()}' MODE (PER-ATTACK TRAINING)")
         if mode == 'core':
             print("Using ONLY the 10 CORE_FIELDS")
-        else:
+        elif mode == 'full':
             print("Using CORE + ALLOWED + ENGINEERED features")
+        elif mode == 'new':
+            print("Using ONLY NEW engineered features")
+        elif mode == 'core_new':
+            print("Using CORE fields + NEW engineered features")
+        else:
+            raise ValueError(f"Unknown mode: {mode}. Must be 'core', 'full', 'new', or 'core_new'")
         print(f"{'='*70}\n")
         
     def load_attack_data(self, attack_type: str):
@@ -141,27 +147,47 @@ class Task3BinaryDetection:
         if self.mode == 'core':
             keep_train = [c for c in CORE_FIELDS if c in train_df.columns]
             keep_test = [c for c in CORE_FIELDS if c in test_df.columns]
-        else:  # full mode
+        elif self.mode == 'full':
             keep_train = [c for c in ALLOWED_FIELDS if c in train_df.columns]
             keep_test = [c for c in ALLOWED_FIELDS if c in test_df.columns]
-        
+        elif self.mode in ['new', 'core_new']:
+            # For new modes, we need minimal fields to generate new features
+            minimal_fields = ['gocbRef', 't', 'Time', 'stNum', 'sqNum', 
+                            'timeAllowedtoLive', 'boolean', 'bit-string', 'attack', 'Length']
+            keep_train = [c for c in minimal_fields if c in train_df.columns]
+            keep_test = [c for c in minimal_fields if c in test_df.columns]
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
+
         train_df = train_df[keep_train].copy()
         test_df = test_df[keep_test].copy()
-        
+
         # Apply preprocessing
         print(f"  Preprocessing {attack_type}...")
         train_df = preprocess_dataframe(train_df)
         train_df = standardize_schema(train_df)
         test_df = preprocess_dataframe(test_df)
         test_df = standardize_schema(test_df)
-        
-        # Engineer features (only in full mode)
+
+        # Engineer features based on mode
         if self.mode == 'full':
             train_df = engineer_features(train_df)
             test_df = engineer_features(test_df)
-        
-        print(f"  {attack_type}: Train={len(train_df)}, Test={len(test_df)}, "
-              f"Features={len(train_df.columns)}")
+        elif self.mode in ['new', 'core_new']:
+            from src.preprocessing import engineer_features_new
+            train_df = engineer_features_new(train_df)
+            test_df = engineer_features_new(test_df)
+            
+            # CRITICAL: For 'new' mode, drop the original CORE numeric features
+            if self.mode == 'new':
+                core_numeric_to_drop = ['timeAllowedtoLive', 'stNum', 'sqNum', 'Length',
+                                    'boolean_1', 'boolean_2', 'boolean_3',
+                                    'bitstring_numeric', 'bitstring_bitcount']
+                train_df.drop(columns=[c for c in core_numeric_to_drop if c in train_df.columns], 
+                            inplace=True, errors='ignore')
+                test_df.drop(columns=[c for c in core_numeric_to_drop if c in test_df.columns], 
+                            inplace=True, errors='ignore')
+                print(f"    (NEW mode: dropped original core features, keeping only engineered)")
         
         return train_df, test_df
         
@@ -898,8 +924,8 @@ def run_task3(config: Dict[str, Any], logger=None) -> Dict:
     results = {}
     attack_types = ['replay', 'masquerade', 'injection', 'poisoning']
     
-    # Run both modes
-    for mode in ['core', 'full']:
+    # Run all modes
+    for mode in ['core', 'full', 'new', 'core_new']:
         print(f"\n{'#'*70}")
         print(f"# STARTING {mode.upper()} MODE ANALYSIS (PER-ATTACK TRAINING)")
         print(f"{'#'*70}\n")
@@ -995,11 +1021,11 @@ def run_task3(config: Dict[str, Any], logger=None) -> Dict:
         }
 
     print("\n" + "="*70)
-    print("TASK 3 COMPLETE - BOTH MODES FINISHED")
+    print("TASK 3 COMPLETE - ALL MODES FINISHED")
     print("="*70)
     print("\nResults available in:")
-    print("  - outputs/figures/task3_core/ and outputs/tables/task3_core/")
-    print("  - outputs/figures/task3_full/ and outputs/tables/task3_full/")
+    for mode in ['core', 'full', 'new', 'core_new']:
+        print(f"  - outputs/figures/task3_{mode}/ and outputs/tables/task3_{mode}/")
     
     return results
 

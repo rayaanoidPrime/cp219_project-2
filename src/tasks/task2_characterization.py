@@ -12,9 +12,10 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Import shared preprocessing utilities
-from preprocessing import (
+from src.preprocessing import (
     CORE_FIELDS,
     ALLOWED_FIELDS,
+    engineer_features_new,
     preprocess_dataframe,
     standardize_schema,
     engineer_features,
@@ -25,7 +26,7 @@ from preprocessing import (
 
 # ==============================================================
 # Task 2: Feature & Attack Characterization (GOOSE-only fields)
-# TWO ANALYSIS MODES: CORE-ONLY vs. FULL (CORE + ALLOWED + ENGINEERED)
+# FOUR ANALYSIS MODES: CORE / FULL / NEW / CORE_NEW
 # ==============================================================
 
 _EPS = 1e-6
@@ -37,7 +38,7 @@ class AttackCharacterizer:
     def __init__(self, config: Dict[str, Any], logger=None, mode: str = 'core'):
         """
         Args:
-            mode: 'core' for CORE_FIELDS only, 'full' for CORE + ALLOWED + ENGINEERED
+            mode: 'core', 'full', 'new', or 'core_new'
         """
         self.config = config
         self.logger = logger
@@ -59,8 +60,14 @@ class AttackCharacterizer:
         print(f"RUNNING TASK 2 IN '{mode.upper()}' MODE")
         if mode == 'core':
             print("Using ONLY the 10 CORE_FIELDS")
-        else:
+        elif mode == 'full':
             print("Using CORE + ALLOWED + ENGINEERED features")
+        elif mode == "new":
+            print("Using ONLY NEW engineered features")
+        elif mode == "core_new":
+            print("Using CORE fields + NEW engineered features")
+        else:
+            raise ValueError(f"Unknown mode: {mode}. Must be 'core', 'full', 'new', or 'core_new'")
         print(f"{'='*70}\n")
 
     # ----------------------- Data Loading -----------------------
@@ -76,8 +83,40 @@ class AttackCharacterizer:
             train_file = self.config['data']['train_files'][attack]
             file_path = data_dir / train_file
             
-            # Use shared preprocessing function
-            df = load_and_preprocess(str(file_path), mode=self.mode)
+            # Load raw data first
+            df = pd.read_csv(file_path)
+            
+            # Select fields based on mode
+            if self.mode == 'core':
+                keep = [c for c in CORE_FIELDS if c in df.columns]
+            elif self.mode == 'full':
+                keep = [c for c in ALLOWED_FIELDS if c in df.columns]
+            elif self.mode in ['new', 'core_new']:
+                # For new modes, we need minimal fields to generate new features
+                
+                keep = [c for c in CORE_FIELDS if c in df.columns]
+            else:
+                raise ValueError(f"Unknown mode: {self.mode}")
+            
+            df = df[keep].copy()
+            
+            # Apply preprocessing (splits boolean, handles bit-string)
+            df = preprocess_dataframe(df)
+            df = standardize_schema(df)
+            
+            # Apply feature engineering based on mode
+            if self.mode == 'full':
+                df = engineer_features(df)
+            elif self.mode in ['new', 'core_new']:
+                df = engineer_features_new(df)
+                
+                # CRITICAL: For 'new' mode, drop the original CORE numeric features
+                # We only want the NEW engineered features
+                if self.mode == 'new':
+                    core_numeric_to_drop = CORE_FIELDS
+                    df.drop(columns=[c for c in core_numeric_to_drop if c in df.columns and c != 'attack'], 
+                           inplace=True, errors='ignore')
+                    print(f"    (NEW mode: dropped original core features, keeping only engineered)")
 
             if 'attack' not in df.columns:
                 raise ValueError(f"'attack' column missing in {train_file}.")
@@ -107,15 +146,8 @@ class AttackCharacterizer:
         print(f"FEATURE STATISTICS BY ATTACK TYPE ({self.mode.upper()} MODE)")
         print("="*70)
 
-        all_data = []
-        for attack, df in self.train_data.items():
-            # Apply feature engineering if in full mode
-            if self.mode == 'full':
-                df_eng = engineer_features(df)
-            else:
-                df_eng = df.copy()
-            all_data.append(df_eng)
-
+        # Data is already preprocessed and engineered in load_data()
+        all_data = [df for df in self.train_data.values()]
         combined = pd.concat(all_data, ignore_index=True)
         numeric_cols = self._numeric_analysis_features(combined)
 
@@ -180,12 +212,8 @@ class AttackCharacterizer:
         print(f"UNSUPERVISED FEATURE IMPORTANCE ({self.mode.upper()} MODE)")
         print("="*70)
 
-        all_data = []
-        for _, df in self.train_data.items():
-            if self.mode == 'full':
-                all_data.append(engineer_features(df))
-            else:
-                all_data.append(df.copy())
+        # Data is already preprocessed and engineered in load_data()
+        all_data = [df for df in self.train_data.values()]
         df_all = pd.concat(all_data, ignore_index=True)
 
         numeric_cols = self._numeric_analysis_features(df_all)
@@ -289,12 +317,8 @@ class AttackCharacterizer:
         print(f"SUPERVISED FEATURE IMPORTANCE ({self.mode.upper()} MODE - For Validation Only)")
         print("="*70)
 
-        all_data = []
-        for _, df in self.train_data.items():
-            if self.mode == 'full':
-                all_data.append(engineer_features(df))
-            else:
-                all_data.append(df.copy())
+        # Data is already preprocessed and engineered in load_data()
+        all_data = [df for df in self.train_data.values()]
         df_all = pd.concat(all_data, ignore_index=True)
 
         numeric_cols = self._numeric_analysis_features(df_all)
@@ -361,36 +385,33 @@ class AttackCharacterizer:
         signatures = {}
 
         for attack_type, df in self.train_data.items():
-            if self.mode == 'full':
-                df_eng = engineer_features(df)
-            else:
-                df_eng = df.copy()
-            normal = df_eng[df_eng['attack'] == 0]
-            attack = df_eng[df_eng['attack'] == 1]
+            # Data is already preprocessed and engineered in load_data()
+            normal = df[df['attack'] == 0]
+            attack = df[df['attack'] == 1]
 
             sig = {
                 'attack_type': attack_type,
-                'num_samples': len(df_eng),
+                'num_samples': len(df),
                 'num_attack': len(attack),
-                'attack_ratio': (len(attack) / max(1, len(df_eng))),
+                'attack_ratio': (len(attack) / max(1, len(df))),
             }
 
             def _m(series): return series.mean() if series.size else np.nan
 
-            if 'stNum' in df_eng.columns:
+            if 'stNum' in df.columns:
                 sig['stNum_mean_normal'] = _m(normal['stNum'])
                 sig['stNum_mean_attack'] = _m(attack['stNum'])
 
-            if 'sqNum' in df_eng.columns:
+            if 'sqNum' in df.columns:
                 sig['sqNum_mean_normal'] = _m(normal['sqNum'])
                 sig['sqNum_mean_attack'] = _m(attack['sqNum'])
 
-            if 'timeAllowedtoLive' in df_eng.columns:
+            if 'timeAllowedtoLive' in df.columns:
                 sig['ttl_mean_normal'] = _m(normal['timeAllowedtoLive'])
                 sig['ttl_mean_attack'] = _m(attack['timeAllowedtoLive'])
 
-            length_col = 'Frame length on the wire' if 'Frame length on the wire' in df_eng.columns else 'Length'
-            if length_col in df_eng.columns:
+            length_col = 'Frame length on the wire' if 'Frame length on the wire' in df.columns else 'Length'
+            if length_col in df.columns:
                 sig['length_mean_normal'] = _m(normal[length_col])
                 sig['length_mean_attack'] = _m(attack[length_col])
 
@@ -403,7 +424,7 @@ class AttackCharacterizer:
                     'sq_reset_violation', 't_st_consistency_violation',
                     'status_change_missing_on_event', 'status_change_violation_on_heartbeat'
                 ]:
-                    if k in df_eng.columns:
+                    if k in df.columns:
                         sig[f'{k}_mean_normal'] = _m(normal[k])
                         sig[f'{k}_mean_attack'] = _m(attack[k])
 
@@ -512,12 +533,8 @@ class AttackCharacterizer:
         print(f"ATTACK DETECTION DIFFICULTY ANALYSIS ({self.mode.upper()} MODE)")
         print("="*70)
 
-        all_data = []
-        for _, df in self.train_data.items():
-            if self.mode == 'full':
-                all_data.append(engineer_features(df))
-            else:
-                all_data.append(df.copy())
+        # Data is already preprocessed and engineered in load_data()
+        all_data = [df for df in self.train_data.values()]
         df_all = pd.concat(all_data, ignore_index=True)
 
         numeric_cols = self._numeric_analysis_features(df_all)
@@ -604,13 +621,10 @@ class AttackCharacterizer:
 
     def corr_delta_heatmap(self):
         """Generate correlation delta heatmap (Attack - Normal)."""
-        all_data = []
-        for _, df in self.train_data.items():
-            if self.mode == 'full':
-                all_data.append(engineer_features(df))
-            else:
-                all_data.append(df.copy())
+        # Data is already preprocessed and engineered in load_data()
+        all_data = [df for df in self.train_data.values()]
         df = pd.concat(all_data, ignore_index=True)
+        
         features = self._numeric_analysis_features(df)
         mats = {}
         for cls in [0, 1]:
@@ -634,24 +648,24 @@ class AttackCharacterizer:
 
 def run_task2(config: Dict[str, Any], logger=None) -> Dict:
     """
-    Execute Task 2: Feature & Attack Characterization in BOTH modes.
+    Execute Task 2: Feature & Attack Characterization in ALL modes.
     
-    Returns results for both CORE-only and FULL (CORE+ALLOWED+ENGINEERED) modes.
+    Returns results for core, full, new, and core_new modes.
     """
     results = {}
     
-    # Run both modes
-    for mode in ['core', 'full']:
+    # Run all modes
+    for mode in ['core', 'full', 'new', 'core_new']:
         print(f"\n{'#'*70}")
         print(f"# STARTING {mode.upper()} MODE ANALYSIS")
         print(f"{'#'*70}\n")
         
         characterizer = AttackCharacterizer(config, logger, mode=mode)
         
-        # Load data
+        # Load data (preprocessing and feature engineering done here once)
         characterizer.load_data()
         
-        # Analyses
+        # Analyses (all use the already-processed data from self.train_data)
         stats_df = characterizer.compute_feature_statistics()
         unsup_importance = characterizer.unsupervised_feature_importance()
         sup_importance = characterizer.supervised_feature_importance()
@@ -672,11 +686,11 @@ def run_task2(config: Dict[str, Any], logger=None) -> Dict:
         print(f"All outputs saved to outputs/figures/task2_{mode}/ and outputs/tables/task2_{mode}/")
     
     print("\n" + "="*70)
-    print("TASK 2 COMPLETE - BOTH MODES FINISHED")
+    print("TASK 2 COMPLETE - ALL MODES FINISHED")
     print("="*70)
     print("\nResults available in:")
-    print("  - outputs/figures/task2_core/ and outputs/tables/task2_core/")
-    print("  - outputs/figures/task2_full/ and outputs/tables/task2_full/")
+    for mode in ['core', 'full', 'new', 'core_new']:
+        print(f"  - outputs/figures/task2_{mode}/ and outputs/tables/task2_{mode}/")
     
     return results
 

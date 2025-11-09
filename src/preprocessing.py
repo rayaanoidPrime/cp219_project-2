@@ -346,6 +346,103 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def engineer_features_new(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    NEW mode features from Rayaan's script.
+    These are the temporal, boolean, bitstring, and protocol-based features.
+    """
+    df = df.copy()
+    
+    # Sort by device and time for temporal features
+    if 'gocbRef' in df.columns and 't' in df.columns:
+        df = df.sort_values(['gocbRef', 't']).reset_index(drop=True)
+    
+    # ===== TEMPORAL FEATURES FROM TIMESTAMP =====
+    if 't' in df.columns:
+        df['t_dt'] = pd.to_datetime(df['t'], errors='coerce', utc=True)
+        df['day'] = df['t_dt'].dt.day
+        df['hour'] = df['t_dt'].dt.hour
+        df['second'] = df['t_dt'].dt.second
+        df['microsecond'] = df['t_dt'].dt.microsecond
+        df['dayofweek'] = df['t_dt'].dt.dayofweek
+        df['unix_time'] = df['t_dt'].astype('int64') // 10**9
+        df.drop(columns=['t_dt'], inplace=True, errors='ignore')
+    
+    # ===== BOOLEAN FEATURES =====
+    # Note: boolean_1, boolean_2, boolean_3 already created in preprocess_dataframe
+    # We'll map them back to bool_1, bool_2, bool_3 for consistency with Rayaan's code
+    if 'boolean_1' in df.columns:
+        df['bool_1'] = df['boolean_1']
+        df['bool_2'] = df['boolean_2']
+        df['bool_3'] = df['boolean_3']
+        
+        # Aggregate boolean stats
+        df['bool_true_count'] = df[['bool_1', 'bool_2', 'bool_3']].eq(1).sum(axis=1)
+        df['bool_false_count'] = df[['bool_1', 'bool_2', 'bool_3']].eq(0).sum(axis=1)
+        df['bool_ratio'] = df['bool_true_count'] / (df['bool_false_count'] + 1)
+        df['bool_has_true'] = (df['bool_true_count'] > 0).astype(int)
+        df['bool_all_false'] = (df['bool_true_count'] == 0).astype(int)
+    
+    # ===== BIT-STRING FEATURES =====
+    if 'bit-string' in df.columns:
+        df['bit-string'] = df['bit-string'].astype(str).fillna('')
+        df['bit_len'] = df['bit-string'].apply(len)
+        df['bit_ones'] = df['bit-string'].apply(lambda x: x.count('1'))
+        df['bit_zeros'] = df['bit-string'].apply(lambda x: x.count('0'))
+        
+        # Extract first 8 bits
+        for i in range(8):
+            df[f'bit_{i}'] = df['bit-string'].str[i].apply(
+                lambda x: int(x) if x in ['0', '1'] else 0
+            )
+    
+    # ===== PER-DEVICE TEMPORAL STATS =====
+    if 'gocbRef' in df.columns:
+        if 'stNum' in df.columns:
+            df['stNum_diff'] = df.groupby('gocbRef')['stNum'].diff().fillna(0)
+            df['stNum_increased'] = (df['stNum_diff'] > 0).astype(int)
+        
+        if 'sqNum' in df.columns:
+            df['sqNum_diff'] = df.groupby('gocbRef')['sqNum'].diff().fillna(0)
+            df['sqNum_reset'] = (df['sqNum_diff'] < 0).astype(int)
+        
+        if 'Time' in df.columns:
+            df['time_between_msgs'] = df.groupby('gocbRef')['Time'].diff().fillna(0)
+            
+            if 'timeAllowedtoLive' in df.columns:
+                df['expected_interval'] = df['timeAllowedtoLive'] / 2000
+                df['time_deviation'] = abs(df['time_between_msgs'] - df['expected_interval'])
+        
+        # Rolling stats
+        for col in ['sqNum', 'Time']:
+            if col in df.columns:
+                g = df.groupby('gocbRef')[col]
+                df[f'{col}_roll_mean'] = g.transform(lambda x: x.rolling(10, 1).mean())
+                df[f'{col}_roll_std'] = g.transform(lambda x: x.rolling(10, 1).std().fillna(0))
+    
+    # ===== PROTOCOL RATIOS =====
+    if 'sqNum' in df.columns and 'stNum' in df.columns:
+        df['sq_st_ratio'] = df['sqNum'] / (df['stNum'] + 1)
+    
+    # ===== ADVANCED TEMPORAL (precise time and deltas) =====
+    if 'unix_time' in df.columns and 'microsecond' in df.columns:
+        df['precise_time'] = df['unix_time'] + df['microsecond'] / 1e6
+        
+        if 'gocbRef' in df.columns:
+            df['delta_time'] = df.groupby('gocbRef')['precise_time'].diff().fillna(
+                df['precise_time'].median()
+            )
+    
+    if 'sqNum' in df.columns and 'gocbRef' in df.columns:
+        df['delta_sqNum'] = df.groupby('gocbRef')['sqNum'].diff().fillna(0)
+        df['rolling_sqNum_mean'] = (
+            df.groupby('gocbRef')['sqNum']
+            .rolling(5, 1)
+            .mean()
+            .reset_index(level=0, drop=True)
+        )
+    
+    return df
 
 def get_numeric_features(df: pd.DataFrame, mode: str = 'core') -> List[str]:
     """
@@ -353,57 +450,78 @@ def get_numeric_features(df: pd.DataFrame, mode: str = 'core') -> List[str]:
     
     Args:
         df: DataFrame with features
-        mode: 'core' for CORE_FIELDS only, 'full' for CORE + ALLOWED + ENGINEERED
+        mode: 'core', 'full', 'new', or 'core_new'
     
     Returns:
         List of numeric feature column names
     """
+    # Core numeric features (basic GOOSE protocol)
+    core_numeric = [
+        'timeAllowedtoLive', 'stNum', 'sqNum', 'Length',
+        'boolean_1', 'boolean_2', 'boolean_3',
+        'bitstring_numeric', 'bitstring_bitcount'
+    ]
+    
+    # Full mode raw features (from ALLOWED_FIELDS)
+    full_raw_numeric = [
+        'Epoch Time', 'Arrival Time', 'Length', 'Frame length on the wire',
+        'Frame length stored into the capture file', 'timeAllowedtoLive',
+        'stNum', 'sqNum',
+        'Time delta from previous captured frame',
+        'Time delta from previous displayed frame',
+        'Time since reference or first frame',
+        'Time shift for this packet',
+        'boolean_1', 'boolean_2', 'boolean_3',
+        'bitstring_numeric', 'bitstring_bitcount',
+    ]
+    
+    # Full mode engineered features (original preprocessing.py features)
+    full_engineered = [
+        'base_time', 'inter_arrival', 'jitter_rolling_std',
+        'msg_rate', 'byte_rate',
+        'ttl_violation', 'ttl_margin',
+        'sqNum_delta', 'sqNum_jump',
+        'stNum_delta', 'stNum_change',
+        'sq_reset_on_st_change',
+        'length_delta',
+        'event_rate_spike',
+        'bit_density',
+        'st_change', 't_change', 'status_bit_change',
+        'sq_reset_expected', 'sq_reset_violation',
+        't_st_consistency_violation',
+        'status_change_missing_on_event',
+        'ttl_half', 'heartbeat_interval_error', 'heartbeat_within_tol',
+        'sq_inc_expected', 'sq_inc_violation_when_no_event',
+        'status_change_violation_on_heartbeat',
+        'stNum_jump_gt1', 'sq_reset_without_st_change',
+        'event_id', 'msgs_since_last_event', 'time_since_last_event', 'event_msg_rank',
+    ]
+    
+    # NEW mode features (from Rayaan's script)
+    new_features = [
+        'day', 'hour', 'second', 'microsecond', 'dayofweek', 'unix_time',
+        'bool_1', 'bool_2', 'bool_3',
+        'bool_true_count', 'bool_false_count', 'bool_ratio', 'bool_has_true', 'bool_all_false',
+        'bit_len', 'bit_ones', 'bit_zeros', 'bit_0', 'bit_1', 'bit_2', 'bit_3', 'bit_4', 'bit_5', 'bit_6', 'bit_7',
+        'stNum_diff', 'sqNum_diff', 'time_between_msgs', 'expected_interval', 'time_deviation',
+        'stNum_increased', 'sqNum_reset',
+        'sqNum_roll_mean', 'sqNum_roll_std', 'Time_roll_mean', 'Time_roll_std',
+        'sq_st_ratio',
+        'precise_time', 'delta_time', 'delta_sqNum', 'rolling_sqNum_mean'
+    ]
+    
+    # Select features based on mode
     if mode == 'core':
-        # CORE mode: only numeric fields from CORE_FIELDS
-        core_numeric = [
-            'timeAllowedtoLive', 'stNum', 'sqNum', 'Length',
-            'boolean_1', 'boolean_2', 'boolean_3',
-            'bitstring_numeric', 'bitstring_bitcount'
-        ]
         numeric_cols = [c for c in core_numeric if c in df.columns]
+    elif mode == 'full':
+        numeric_cols = [c for c in (full_raw_numeric + full_engineered) if c in df.columns]
+    elif mode == 'new':
+        numeric_cols = [c for c in new_features if c in df.columns]
+    elif mode == 'core_new':
+        numeric_cols = [c for c in (core_numeric + new_features) if c in df.columns]
     else:
-        # FULL mode: raw + engineered
-        raw_numeric = [
-            'Epoch Time', 'Arrival Time', 'Length', 'Frame length on the wire',
-            'Frame length stored into the capture file', 'timeAllowedtoLive',
-            'stNum', 'sqNum',
-            'Time delta from previous captured frame',
-            'Time delta from previous displayed frame',
-            'Time since reference or first frame',
-            'Time shift for this packet',
-            'boolean_1', 'boolean_2', 'boolean_3',
-            'bitstring_numeric', 'bitstring_bitcount',
-        ]
-        raw_numeric = [c for c in raw_numeric if c in df.columns]
-
-        engineered = [
-            'base_time', 'inter_arrival', 'jitter_rolling_std',
-            'msg_rate', 'byte_rate',
-            'ttl_violation', 'ttl_margin',
-            'sqNum_delta', 'sqNum_jump',
-            'stNum_delta', 'stNum_change',
-            'sq_reset_on_st_change',
-            'length_delta',
-            'event_rate_spike',
-            'bit_density',
-            'st_change', 't_change', 'status_bit_change',
-            'sq_reset_expected', 'sq_reset_violation',
-            't_st_consistency_violation',
-            'status_change_missing_on_event',
-            'ttl_half', 'heartbeat_interval_error', 'heartbeat_within_tol',
-            'sq_inc_expected', 'sq_inc_violation_when_no_event',
-            'status_change_violation_on_heartbeat',
-            'stNum_jump_gt1', 'sq_reset_without_st_change',
-            'event_id', 'msgs_since_last_event', 'time_since_last_event', 'event_msg_rank',
-        ]
-        engineered = [c for c in engineered if c in df.columns]
-        numeric_cols = raw_numeric + engineered
-
+        raise ValueError(f"Unknown mode: {mode}. Must be 'core', 'full', 'new', or 'core_new'")
+    
     # Exclude attack column and verify numeric dtype
     numeric_cols = [c for c in numeric_cols if c != 'attack']
     numeric_cols = [c for c in numeric_cols if pd.api.types.is_numeric_dtype(df[c])]
@@ -451,7 +569,7 @@ def load_combined_datasets(data_dir, train_files: dict, test_files: dict, mode: 
         data_dir: Path to data directory
         train_files: Dict mapping attack_type -> train filename
         test_files: Dict mapping attack_type -> test filename
-        mode: 'core' or 'full'
+        mode: 'core', 'full', 'new', or 'core_new'
     
     Returns:
         Tuple of (combined_train_df, combined_test_df)
@@ -464,10 +582,7 @@ def load_combined_datasets(data_dir, train_files: dict, test_files: dict, mode: 
     
     print("\nLoading and combining all attack datasets...")
     
-    for attack_type in (train_files.keys()):
-        # if attack_type.lower() == 'poisoning':
-        #     print(f"  ➤ Skipping {attack_type} dataset.")
-        #     continue
+    for attack_type in train_files.keys():
         print(f"  Loading {attack_type}...")
         
         # Load train
@@ -482,9 +597,17 @@ def load_combined_datasets(data_dir, train_files: dict, test_files: dict, mode: 
         if mode == 'core':
             keep_train = [c for c in CORE_FIELDS if c in train_df.columns]
             keep_test = [c for c in CORE_FIELDS if c in test_df.columns]
-        else:  # full mode
+        elif mode == 'full':
             keep_train = [c for c in ALLOWED_FIELDS if c in train_df.columns]
             keep_test = [c for c in ALLOWED_FIELDS if c in test_df.columns]
+        elif mode in ['new', 'core_new']:
+            # For new modes, we need minimal fields to generate new features
+            minimal_fields = ['gocbRef', 't', 'Time', 'stNum', 'sqNum', 
+                            'timeAllowedtoLive', 'boolean', 'bit-string', 'attack', 'Length']
+            keep_train = [c for c in minimal_fields if c in train_df.columns]
+            keep_test = [c for c in minimal_fields if c in test_df.columns]
+        else:
+            raise ValueError(f"Unknown mode: {mode}. Must be 'core', 'full', 'new', or 'core_new'")
         
         train_df = train_df[keep_train].copy()
         test_df = test_df[keep_test].copy()
@@ -495,12 +618,26 @@ def load_combined_datasets(data_dir, train_files: dict, test_files: dict, mode: 
         test_df = preprocess_dataframe(test_df)
         test_df = standardize_schema(test_df)
         
-        # Engineer features (only in full mode)
+        # Engineer features based on mode
         if mode == 'full':
             train_df = engineer_features(train_df)
             test_df = engineer_features(test_df)
+        elif mode in ['new', 'core_new']:
+            train_df = engineer_features_new(train_df)
+            test_df = engineer_features_new(test_df)
+            
+            # CRITICAL: For 'new' mode, drop the original CORE numeric features
+            if mode == 'new':
+                core_numeric_to_drop = ['timeAllowedtoLive', 'stNum', 'sqNum', 'Length',
+                                    'boolean_1', 'boolean_2', 'boolean_3',
+                                    'bitstring_numeric', 'bitstring_bitcount']
+                train_df.drop(columns=[c for c in core_numeric_to_drop if c in train_df.columns], 
+                            inplace=True, errors='ignore')
+                test_df.drop(columns=[c for c in core_numeric_to_drop if c in test_df.columns], 
+                            inplace=True, errors='ignore')
+                print(f"    (NEW mode: dropped original core features, keeping only engineered)")
 
-         # Tag dataset rows with their attack source (required for balanced evaluation)
+        # Tag dataset rows with their attack source (required for balanced evaluation)
         train_df['attack_type'] = attack_type
         test_df['attack_type'] = attack_type
         
@@ -519,6 +656,102 @@ def load_combined_datasets(data_dir, train_files: dict, test_files: dict, mode: 
     
     return combined_train, combined_test
 
+def load_combined_datasets(data_dir, train_files: dict, test_files: dict, mode: str = 'core'):
+    """
+    Load and combine all attack datasets into single training and test sets.
+    
+    Args:
+        data_dir: Path to data directory
+        train_files: Dict mapping attack_type -> train filename
+        test_files: Dict mapping attack_type -> test filename
+        mode: 'core', 'full', 'new', or 'core_new'
+    
+    Returns:
+        Tuple of (combined_train_df, combined_test_df)
+    """
+    from pathlib import Path
+    
+    data_dir = Path(data_dir)
+    train_dfs = []
+    test_dfs = []
+    
+    print("\nLoading and combining all attack datasets...")
+    
+    for attack_type in train_files.keys():
+        print(f"  Loading {attack_type}...")
+        
+        # Load train
+        train_file = data_dir / train_files[attack_type]
+        train_df = pd.read_csv(train_file)
+        
+        # Load test
+        test_file = data_dir / test_files[attack_type]
+        test_df = pd.read_csv(test_file)
+        
+        # Select fields based on mode
+        if mode == 'core':
+            keep_train = [c for c in CORE_FIELDS if c in train_df.columns]
+            keep_test = [c for c in CORE_FIELDS if c in test_df.columns]
+        elif mode == 'full':
+            keep_train = [c for c in ALLOWED_FIELDS if c in train_df.columns]
+            keep_test = [c for c in ALLOWED_FIELDS if c in test_df.columns]
+        elif mode in ['new', 'core_new']:
+            # For new modes, we need minimal fields to generate new features
+            minimal_fields = ['gocbRef', 't', 'Time', 'stNum', 'sqNum', 
+                            'timeAllowedtoLive', 'boolean', 'bit-string', 'attack', 'Length']
+            keep_train = [c for c in minimal_fields if c in train_df.columns]
+            keep_test = [c for c in minimal_fields if c in test_df.columns]
+        else:
+            raise ValueError(f"Unknown mode: {mode}. Must be 'core', 'full', 'new', or 'core_new'")
+        
+        train_df = train_df[keep_train].copy()
+        test_df = test_df[keep_test].copy()
+        
+        # Apply preprocessing
+        train_df = preprocess_dataframe(train_df)
+        train_df = standardize_schema(train_df)
+        test_df = preprocess_dataframe(test_df)
+        test_df = standardize_schema(test_df)
+        
+        # Engineer features based on mode
+        if mode == 'full':
+            train_df = engineer_features(train_df)
+            test_df = engineer_features(test_df)
+        elif mode in ['new', 'core_new']:
+            train_df = engineer_features_new(train_df)
+            test_df = engineer_features_new(test_df)
+            
+            # CRITICAL: For 'new' mode, drop the original CORE numeric features
+            if mode == 'new':
+                core_numeric_to_drop = ['timeAllowedtoLive', 'stNum', 'sqNum', 'Length',
+                                    'boolean_1', 'boolean_2', 'boolean_3',
+                                    'bitstring_numeric', 'bitstring_bitcount']
+                train_df.drop(columns=[c for c in core_numeric_to_drop if c in train_df.columns], 
+                            inplace=True, errors='ignore')
+                test_df.drop(columns=[c for c in core_numeric_to_drop if c in test_df.columns], 
+                            inplace=True, errors='ignore')
+                print(f"    (NEW mode: dropped original core features, keeping only engineered)")
+
+        # Tag dataset rows with their attack source (required for balanced evaluation)
+        train_df['attack_type'] = attack_type
+        test_df['attack_type'] = attack_type
+        
+        train_dfs.append(train_df)
+        test_dfs.append(test_df)
+        
+        print(f"    {attack_type}: Train={len(train_df)}, Test={len(test_df)}")
+    
+    # Combine all datasets
+    combined_train = pd.concat(train_dfs, ignore_index=True)
+    combined_test = pd.concat(test_dfs, ignore_index=True)
+    
+    print(f"\n  Combined datasets:")
+    print(f"    Total Train: {len(combined_train)}, Attack ratio: {combined_train['attack'].mean():.2%}")
+    print(f"    Total Test: {len(combined_test)}, Attack ratio: {combined_test['attack'].mean():.2%}")
+    
+    return combined_train, combined_test
+
+
 def load_combined_datasets_multiclass(
     data_dir: Path, 
     train_files: dict, 
@@ -528,7 +761,7 @@ def load_combined_datasets_multiclass(
     """
     Load and combine all attack datasets for MULTI-CLASS detection (Task 4).
     Key difference from load_combined_datasets():
-    - Normal samples (attack=0) are labeled as 'Normal' regardless of source dataset
+    - Normal samples (attack=0) are labeled as 'normal' regardless of source dataset
     - Attack samples (attack=1) are labeled with their specific attack type
     
     This gives us 5 classes: Normal, Injection, Masquerade, Poisoning, Replay
@@ -537,12 +770,11 @@ def load_combined_datasets_multiclass(
         data_dir: Path to data directory
         train_files: Dict mapping attack_type -> train filename
         test_files: Dict mapping attack_type -> test filename
-        mode: 'core' or 'full'
+        mode: 'core', 'full', 'new', or 'core_new'
     
     Returns:
         Tuple of (combined_train_df, combined_test_df) with 'attack_type' column
-        containing multi-class labels
-    FIXED: Now returns lowercase labels to match Task 4 expectations.
+        containing multi-class labels (lowercase)
     """
     data_dir = Path(data_dir)
     train_dfs = []
@@ -568,25 +800,45 @@ def load_combined_datasets_multiclass(
         if mode == 'core':
             keep_train = [c for c in CORE_FIELDS if c in train_df.columns]
             keep_test = [c for c in CORE_FIELDS if c in test_df.columns]
-        else:  # full mode
+        elif mode == 'full':
             keep_train = [c for c in ALLOWED_FIELDS if c in train_df.columns]
             keep_test = [c for c in ALLOWED_FIELDS if c in test_df.columns]
+        elif mode in ['new', 'core_new']:
+            # For new modes, we need minimal fields to generate new features
+            minimal_fields = ['gocbRef', 't', 'Time', 'stNum', 'sqNum', 
+                            'timeAllowedtoLive', 'boolean', 'bit-string', 'attack', 'Length']
+            keep_train = [c for c in minimal_fields if c in train_df.columns]
+            keep_test = [c for c in minimal_fields if c in test_df.columns]
+        else:
+            raise ValueError(f"Unknown mode: {mode}. Must be 'core', 'full', 'new', or 'core_new'")
         
         train_df = train_df[keep_train].copy()
         test_df = test_df[keep_test].copy()
         
         # Apply preprocessing
-        from src.preprocessing import preprocess_dataframe, standardize_schema, engineer_features
-        
         train_df = preprocess_dataframe(train_df)
         train_df = standardize_schema(train_df)
         test_df = preprocess_dataframe(test_df)
         test_df = standardize_schema(test_df)
         
-        # Engineer features (only in full mode)
+        # Engineer features based on mode
         if mode == 'full':
             train_df = engineer_features(train_df)
             test_df = engineer_features(test_df)
+        elif mode in ['new', 'core_new']:
+            train_df = engineer_features_new(train_df)
+            test_df = engineer_features_new(test_df)
+            
+            # CRITICAL: For 'new' mode, drop the original CORE numeric features
+            if mode == 'new':
+                core_numeric_to_drop = ['timeAllowedtoLive', 'stNum', 'sqNum', 'Length',
+                                    'boolean_1', 'boolean_2', 'boolean_3',
+                                    'bitstring_numeric', 'bitstring_bitcount']
+                train_df.drop(columns=[c for c in core_numeric_to_drop if c in train_df.columns], 
+                            inplace=True, errors='ignore')
+                test_df.drop(columns=[c for c in core_numeric_to_drop if c in test_df.columns], 
+                            inplace=True, errors='ignore')
+                print(f"    (NEW mode: dropped original core features, keeping only engineered)")
         
         # CRITICAL: Check that 'attack' column exists
         if 'attack' not in train_df.columns or 'attack' not in test_df.columns:
@@ -604,11 +856,12 @@ def load_combined_datasets_multiclass(
         print(f"    Train: {len(train_normal)} normal, {len(train_attack)} attack")
         print(f"    Test:  {len(test_normal)} normal, {len(test_attack)} attack")
         
+        # Normal samples -> 'normal' label
         train_normal['attack_type'] = 'normal'
         test_normal['attack_type'] = 'normal'
         
         # Attack samples -> specific attack type (lowercase)
-        attack_label = attack_type.lower()  # FIXED: Changed from .capitalize() to .lower()
+        attack_label = attack_type.lower()
         train_attack['attack_type'] = attack_label
         test_attack['attack_type'] = attack_label
         
@@ -644,23 +897,23 @@ def load_combined_datasets_multiclass(
         pct = count / len(combined_test) * 100
         print(f"    {attack_type:12s}: {count:6d} ({pct:5.2f}%)")
     
-    # Verify expected distributions (based on your official numbers)
+    # Verify expected distributions
     print(f"\n  Verification against expected counts:")
     
     expected_train = {
-        'Normal': 27958,      # 9995 + 6639 + 8309 + 3015
-        'Injection': 100,
-        'Masquerade': 100,
-        'Poisoning': 2000,
-        'Replay': 100
+        'normal': 27958,      # 9995 + 6639 + 8309 + 3015
+        'injection': 100,
+        'masquerade': 100,
+        'poisoning': 2000,
+        'replay': 100
     }
     
     expected_test = {
-        'Normal': 27952,      # 10123 + 6366 + 8357 + 3106
-        'Injection': 100,
-        'Masquerade': 100,
-        'Poisoning': 2000,
-        'Replay': 100
+        'normal': 27952,      # 10123 + 6366 + 8357 + 3106
+        'injection': 100,
+        'masquerade': 100,
+        'poisoning': 2000,
+        'replay': 100
     }
     
     all_correct = True
