@@ -34,3 +34,8 @@ advanced = [
     "xgboost>=1.5.0",
 ]
 
+deep = [
+    "torch>=2.0.0",  # For autoencoders
+    "umap-learn>=0.5.0",  # For UMAP
+]
+

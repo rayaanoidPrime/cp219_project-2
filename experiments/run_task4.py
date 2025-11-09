@@ -155,11 +155,11 @@ def main():
                       f"Acc={row['Accuracy']:.4f}")
             
             print(f"\n  Per-Class F1-Scores (Best Model):")
-            print(f"    Normal:      {best['F1_Normal']:.4f}")
-            print(f"    Injection:   {best['F1_Injection']:.4f}")
-            print(f"    Masquerade:  {best['F1_Masquerade']:.4f}")
-            print(f"    Poisoning:   {best['F1_Poisoning']:.4f}")
-            print(f"    Replay:      {best['F1_Replay']:.4f}")
+            print(f"    Normal:      {best['F1_normal']:.4f}")
+            print(f"    Injection:   {best['F1_injection']:.4f}")
+            print(f"    Masquerade:  {best['F1_masquerade']:.4f}")
+            print(f"    Poisoning:   {best['F1_poisoning']:.4f}")
+            print(f"    Replay:      {best['F1_replay']:.4f}")
         
         # Output locations
         print("\n" + "="*70)
@@ -212,11 +212,11 @@ def main():
         print(f"\nAttack Detectability (FULL mode):")
         best_full = results['full']['summary'].iloc[0]
         attack_f1s = {
-            'Normal': best_full['F1_Normal'],
-            'Injection': best_full['F1_Injection'],
-            'Masquerade': best_full['F1_Masquerade'],
-            'Poisoning': best_full['F1_Poisoning'],
-            'Replay': best_full['F1_Replay']
+            'Normal': best_full['F1_normal'],
+            'Injection': best_full['F1_injection'],
+            'Masquerade': best_full['F1_masquerade'],
+            'Poisoning': best_full['F1_poisoning'],
+            'Replay': best_full['F1_replay']
         }
         sorted_attacks = sorted(attack_f1s.items(), key=lambda x: x[1], reverse=True)
         for attack, f1 in sorted_attacks:

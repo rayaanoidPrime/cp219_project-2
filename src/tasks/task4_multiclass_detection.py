@@ -23,6 +23,13 @@ from sklearn.metrics import (
     accuracy_score, precision_recall_fscore_support,
     confusion_matrix, classification_report
 )
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import umap
+from sklearn.cluster import DBSCAN, HDBSCAN
 from scipy.optimize import linear_sum_assignment
 
 from src.preprocessing import (
@@ -322,6 +329,345 @@ class MultiClassDetector:
         return memory_info
         
 
+class AutoencoderModel(nn.Module):
+    """PyTorch Autoencoder for dimensionality reduction."""
+    
+    def __init__(self, input_dim, encoder_layers, latent_dim, decoder_layers, 
+                 activation='relu', dropout=0.2):
+        super(AutoencoderModel, self).__init__()
+        
+        # Activation function
+        if activation == 'relu':
+            self.activation = nn.ReLU()
+        elif activation == 'tanh':
+            self.activation = nn.Tanh()
+        elif activation == 'leaky_relu':
+            self.activation = nn.LeakyReLU(0.2)
+        else:
+            self.activation = nn.ReLU()
+        
+        # Build encoder
+        encoder_layers_list = []
+        prev_dim = input_dim
+        for hidden_dim in encoder_layers:
+            encoder_layers_list.append(nn.Linear(prev_dim, hidden_dim))
+            encoder_layers_list.append(self.activation)
+            encoder_layers_list.append(nn.Dropout(dropout))
+            prev_dim = hidden_dim
+        
+        # Latent layer
+        encoder_layers_list.append(nn.Linear(prev_dim, latent_dim))
+        self.encoder = nn.Sequential(*encoder_layers_list)
+        
+        # Build decoder
+        decoder_layers_list = []
+        prev_dim = latent_dim
+        for hidden_dim in decoder_layers:
+            decoder_layers_list.append(nn.Linear(prev_dim, hidden_dim))
+            decoder_layers_list.append(self.activation)
+            decoder_layers_list.append(nn.Dropout(dropout))
+            prev_dim = hidden_dim
+        
+        # Output layer
+        decoder_layers_list.append(nn.Linear(prev_dim, input_dim))
+        self.decoder = nn.Sequential(*decoder_layers_list)
+    
+    def forward(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return decoded
+    
+    def encode(self, x):
+        return self.encoder(x)
+
+
+class AutoencoderDetector(MultiClassDetector):
+    """Autoencoder-based detector that clusters in latent space."""
+    
+    def __init__(self, name: str, config: Dict):
+        super().__init__(name, None, config)
+        
+        self.autoencoder = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.clustering_model = None
+        
+        # Extract config
+        self.ae_config = config.get('autoencoder', {})
+        self.n_clusters = 5
+        
+    def fit(self, X):
+        """Train autoencoder, then cluster in latent space."""
+        start = time.time()
+        
+        # Step 1: Train Autoencoder
+        print(f"      Training Autoencoder...")
+        input_dim = X.shape[1]
+        
+        # Build autoencoder
+        self.autoencoder = AutoencoderModel(
+            input_dim=input_dim,
+            encoder_layers=self.ae_config.get('architecture', {}).get('encoder_layers', [128, 64, 32]),
+            latent_dim=self.ae_config.get('architecture', {}).get('latent_dim', 16),
+            decoder_layers=self.ae_config.get('architecture', {}).get('decoder_layers', [32, 64, 128]),
+            activation=self.ae_config.get('activation', 'relu'),
+            dropout=self.ae_config.get('dropout', 0.2)
+        ).to(self.device)
+        
+        # Training parameters
+        train_config = self.ae_config.get('training', {})
+        epochs = train_config.get('epochs', 100)
+        batch_size = train_config.get('batch_size', 256)
+        learning_rate = train_config.get('learning_rate', 0.001)
+        validation_split = train_config.get('validation_split', 0.2)
+        patience = train_config.get('early_stopping_patience', 10)
+        
+        # Prepare data
+        X_tensor = torch.FloatTensor(X).to(self.device)
+        
+        # Train/validation split
+        n_train = int(len(X) * (1 - validation_split))
+        X_train_tensor = X_tensor[:n_train]
+        X_val_tensor = X_tensor[n_train:]
+        
+        train_dataset = TensorDataset(X_train_tensor, X_train_tensor)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        
+        # Optimizer and loss
+        optimizer = optim.Adam(self.autoencoder.parameters(), lr=learning_rate)
+        criterion = nn.MSELoss()
+        
+        # Training loop
+        best_val_loss = float('inf')
+        patience_counter = 0
+        
+        self.autoencoder.train()
+        for epoch in range(epochs):
+            train_loss = 0
+            for batch_X, batch_y in train_loader:
+                optimizer.zero_grad()
+                output = self.autoencoder(batch_X)
+                loss = criterion(output, batch_y)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item()
+            
+            train_loss /= len(train_loader)
+            
+            # Validation
+            self.autoencoder.eval()
+            with torch.no_grad():
+                val_output = self.autoencoder(X_val_tensor)
+                val_loss = criterion(val_output, X_val_tensor).item()
+            self.autoencoder.train()
+            
+            # Early stopping
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"        Early stopping at epoch {epoch+1}")
+                    break
+            
+            if (epoch + 1) % 10 == 0:
+                print(f"        Epoch {epoch+1}/{epochs}: Train Loss={train_loss:.6f}, Val Loss={val_loss:.6f}")
+        
+        # Step 2: Extract latent representations
+        print(f"      Extracting latent representations...")
+        self.autoencoder.eval()
+        with torch.no_grad():
+            X_latent = self.autoencoder.encode(X_tensor).cpu().numpy()
+        
+        # Step 3: Cluster in latent space
+        print(f"      Clustering in latent space...")
+        from sklearn.cluster import KMeans
+        self.clustering_model = KMeans(
+            n_clusters=self.n_clusters,
+            random_state=42,
+            n_init=10,
+            max_iter=300
+        )
+        self.clustering_model.fit(X_latent)
+        
+        # Set self.model for parent class compatibility
+        self.model = self.clustering_model
+        
+        # Store for prediction
+        self.train_cluster_labels_ = self.clustering_model.labels_
+        
+        self.train_time = time.time() - start
+        print(f"      Total training time: {self.train_time:.2f}s")
+        
+        return self
+    
+    def fit_and_map(self, X_train, y_train_true):
+        """FIX: Override to handle latent space transformation."""
+        # Fit model
+        self.fit(X_train)
+        
+        # Get cluster predictions on training set (in latent space)
+        y_train_clusters = self.predict_clusters(X_train)
+        
+        # Learn optimal mapping
+        self.cluster_to_class_map_ = self._find_optimal_mapping(
+            y_train_true, y_train_clusters
+        )
+        
+        return self
+    
+    def predict_clusters(self, X):
+        """Predict clusters for new data."""
+        start = time.time()
+        
+        # Step 1: Encode with autoencoder
+        self.autoencoder.eval()
+        with torch.no_grad():
+            X_tensor = torch.FloatTensor(X).to(self.device)
+            X_latent = self.autoencoder.encode(X_tensor).cpu().numpy()
+        
+        # Step 2: Predict clusters
+        clusters = self.clustering_model.predict(X_latent)
+        
+        self.inference_time = (time.time() - start) / len(X)
+        return clusters
+    
+    def get_memory_mb(self):
+        """Estimate memory usage."""
+        total_bytes = 0
+        
+        # Autoencoder parameters
+        if self.autoencoder is not None:
+            for param in self.autoencoder.parameters():
+                total_bytes += param.data.nelement() * param.data.element_size()
+        
+        # Clustering model
+        if self.clustering_model is not None:
+            total_bytes += sys.getsizeof(self.clustering_model)
+            if hasattr(self.clustering_model, 'cluster_centers_'):
+                total_bytes += self.clustering_model.cluster_centers_.nbytes
+        
+        # Labels
+        if self.train_cluster_labels_ is not None:
+            total_bytes += self.train_cluster_labels_.nbytes
+        
+        # Mapping
+        if self.cluster_to_class_map_ is not None:
+            total_bytes += sys.getsizeof(self.cluster_to_class_map_)
+            for k, v in self.cluster_to_class_map_.items():
+                total_bytes += sys.getsizeof(k) + sys.getsizeof(v)
+        
+        return total_bytes / (1024 * 1024)
+
+
+class UMAPDetector(MultiClassDetector):
+    """UMAP-based detector that clusters in UMAP projection space."""
+    
+    def __init__(self, name: str, config: Dict):
+        super().__init__(name, None, config)
+        
+        self.umap_model = None
+        self.clustering_model = None
+        
+        # Extract config
+        self.umap_config = config.get('umap', {})
+        self.n_clusters = 5
+        
+    def fit(self, X):
+        """Apply UMAP projection, then cluster."""
+        start = time.time()
+        
+        # Step 1: Apply UMAP
+        print(f"      Applying UMAP projection...")
+        self.umap_model = umap.UMAP(
+            n_components=self.umap_config.get('n_components', 10),  # Higher dim for clustering
+            n_neighbors=self.umap_config.get('n_neighbors', 15),
+            min_dist=self.umap_config.get('min_dist', 0.1),
+            metric=self.umap_config.get('metric', 'euclidean'),
+            random_state=self.umap_config.get('random_state', 42)
+        )
+        X_projected = self.umap_model.fit_transform(X)
+        print(f"        Projected to {X_projected.shape[1]} dimensions")
+        
+        # Step 2: Cluster in UMAP space
+        print(f"      Clustering in UMAP space...")
+        from sklearn.cluster import KMeans
+        self.clustering_model = KMeans(
+            n_clusters=self.n_clusters,
+            random_state=42,
+            n_init=10,
+            max_iter=300
+        )
+        self.clustering_model.fit(X_projected)
+        
+        # Set self.model for parent class compatibility
+        self.model = self.clustering_model
+        
+        # Store for prediction
+        self.train_cluster_labels_ = self.clustering_model.labels_
+        
+        self.train_time = time.time() - start
+        print(f"      Total training time: {self.train_time:.2f}s")
+        
+        return self
+    
+    def fit_and_map(self, X_train, y_train_true):
+        """FIX: Override to handle UMAP transformation."""
+        # Fit model
+        self.fit(X_train)
+        
+        # Get cluster predictions on training set (in UMAP space)
+        y_train_clusters = self.predict_clusters(X_train)
+        
+        # Learn optimal mapping
+        self.cluster_to_class_map_ = self._find_optimal_mapping(
+            y_train_true, y_train_clusters
+        )
+        
+        return self
+    
+    def predict_clusters(self, X):
+        """Predict clusters for new data."""
+        start = time.time()
+        
+        # Step 1: Project with UMAP
+        X_projected = self.umap_model.transform(X)
+        
+        # Step 2: Predict clusters
+        clusters = self.clustering_model.predict(X_projected)
+        
+        self.inference_time = (time.time() - start) / len(X)
+        return clusters
+    
+    def get_memory_mb(self):
+        """Estimate memory usage."""
+        total_bytes = 0
+        
+        # UMAP model
+        if self.umap_model is not None:
+            total_bytes += sys.getsizeof(self.umap_model)
+            # UMAP stores embedding
+            if hasattr(self.umap_model, 'embedding_'):
+                total_bytes += self.umap_model.embedding_.nbytes
+        
+        # Clustering model
+        if self.clustering_model is not None:
+            total_bytes += sys.getsizeof(self.clustering_model)
+            if hasattr(self.clustering_model, 'cluster_centers_'):
+                total_bytes += self.clustering_model.cluster_centers_.nbytes
+        
+        # Labels
+        if self.train_cluster_labels_ is not None:
+            total_bytes += self.train_cluster_labels_.nbytes
+        
+        # Mapping
+        if self.cluster_to_class_map_ is not None:
+            total_bytes += sys.getsizeof(self.cluster_to_class_map_)
+            for k, v in self.cluster_to_class_map_.items():
+                total_bytes += sys.getsizeof(k) + sys.getsizeof(v)
+        
+        return total_bytes / (1024 * 1024)
+
 
 class Task4MultiClassDetection:
     """Task 4: Multi-Class Intrusion Detection."""
@@ -329,7 +675,7 @@ class Task4MultiClassDetection:
     def __init__(self, config: Dict[str, Any], logger=None, mode: str = 'core'):
         """
         Args:
-            mode: 'core' for CORE_FIELDS only, 'full' for CORE + ALLOWED + ENGINEERED
+            mode: 'core', 'full', 'new', or 'core_new'
         """
         self.config = config
         self.logger = logger
@@ -360,8 +706,14 @@ class Task4MultiClassDetection:
         print(f"RUNNING TASK 4 IN '{mode.upper()}' MODE (MULTI-CLASS DETECTION)")
         if mode == 'core':
             print("Using ONLY the 10 CORE_FIELDS")
-        else:
+        elif mode == 'full':
             print("Using CORE + ALLOWED + ENGINEERED features")
+        elif mode == 'new':
+            print("Using ONLY NEW engineered features")
+        elif mode == 'core_new':
+            print("Using CORE fields + NEW engineered features")
+        else:
+            raise ValueError(f"Unknown mode: {mode}. Must be 'core', 'full', 'new', or 'core_new'")
         print(f"Classes: {', '.join(self.class_names)}")
         print(f"{'='*70}\n")
     
@@ -470,8 +822,13 @@ class Task4MultiClassDetection:
         
         return X_train_scaled, y_train, X_test_scaled, y_test, feature_names, scaler
     
+    # Update the create_models method
     def create_models(self):
         """Create all clustering models to compare."""
+        
+        # Load config
+        dim_red_config = self.config.get('dimensionality_reduction', {})
+        
         models = {
             'K-Means': MultiClassDetector(
                 'K-Means',
@@ -498,18 +855,21 @@ class Task4MultiClassDetection:
                     linkage='ward'
                 )
             ),
-            'Spectral': MultiClassDetector(
-                'Spectral',
-                SpectralClustering(
-                    n_clusters=5,
-                    random_state=42,
-                    affinity='rbf',
-                    n_init=10
-                )
-            )
         }
         
+        # Add Autoencoder model if enabled
+        if dim_red_config.get('enabled', False):
+            if dim_red_config.get('autoencoder', {}).get('enabled', True):
+                ae_config = {'autoencoder': dim_red_config.get('autoencoder', {})}
+                models['Autoencoder'] = AutoencoderDetector('Autoencoder', ae_config)
+            
+            # Add UMAP model if enabled
+            if dim_red_config.get('umap', {}).get('enabled', True):
+                umap_config = {'umap': dim_red_config.get('umap', {})}
+                models['UMAP'] = UMAPDetector('UMAP', umap_config)
+        
         return models
+
     
     def evaluate_model(self, model: MultiClassDetector, X_test, y_test):
         """Evaluate multi-class model using macro-averaged metrics."""
@@ -1093,7 +1453,8 @@ def run_task4(config: Dict[str, Any], logger=None) -> Dict:
     results = {}
     
     # Run both modes: CORE (10 features) and FULL (all features)
-    for mode in ['core', 'full']:
+    # Run all four modes
+    for mode in ['core', 'full', 'new', 'core_new']:
         print(f"\n{'#'*70}")
         print(f"# STARTING {mode.upper()} MODE ANALYSIS")
         print(f"{'#'*70}\n")
@@ -1140,11 +1501,7 @@ def run_task4(config: Dict[str, Any], logger=None) -> Dict:
         # Log to Weights & Biases if available
         if logger:
             logger.log_dataframe(summary_df, f"task4_{mode}/model_comparison")
-            logger.log_dict({
-                f"task4_{mode}/best_model": summary_df.iloc[0]['Model'],
-                f"task4_{mode}/best_f1_macro": summary_df.iloc[0]['F1-Score (Macro)'],
-                f"task4_{mode}/best_accuracy": summary_df.iloc[0]['Accuracy']
-            })
+            
         
         # Store results for this mode
         results[mode] = {
@@ -1165,23 +1522,24 @@ def run_task4(config: Dict[str, Any], logger=None) -> Dict:
     print("TASK 4 COMPLETE - BOTH MODES FINISHED")
     print("="*70)
     print("\nComparison between modes:")
-    print(f"  CORE mode best F1-Macro: {results['core']['summary'].iloc[0]['F1-Score (Macro)']:.4f}")
-    print(f"  FULL mode best F1-Macro: {results['full']['summary'].iloc[0]['F1-Score (Macro)']:.4f}")
-    
+    for mode in ['core', 'full', 'new', 'core_new']:
+        best_f1 = results[mode]['summary'].iloc[0]['F1-Score (Macro)']
+        best_model = results[mode]['summary'].iloc[0]['Model']
+        print(f"  {mode.upper():10s} best F1-Macro: {best_f1:.4f} ({best_model})")
+
     print("\nPer-class performance (best models):")
     class_names = ['normal', 'injection', 'masquerade', 'poisoning', 'replay']
-    
-    for mode in ['core', 'full']:
+
+    for mode in ['core', 'full', 'new', 'core_new']:
         best = results[mode]['summary'].iloc[0]
         print(f"\n  {mode.upper()} mode ({best['Model']}):")
         for class_name in class_names:
             f1_score = best[f'F1_{class_name}']
             print(f"    {class_name:12s}: {f1_score:.4f}")
-    
+
     print("\nResults saved to:")
-    print("  - outputs/figures/task4_core/ and outputs/tables/task4_core/")
-    print("  - outputs/figures/task4_full/ and outputs/tables/task4_full/")
-    print("  - outputs/models/task4_core/ and outputs/models/task4_full/")
+    for mode in ['core', 'full', 'new', 'core_new']:
+        print(f"  - outputs/figures/task4_{mode}/ and outputs/tables/task4_{mode}/")
     
     return results
 
@@ -1229,7 +1587,7 @@ if __name__ == '__main__':
     
     class_names = ['normal', 'injection', 'masquerade', 'poisoning', 'replay']
     
-    for mode in ['core', 'full']:
+    for mode in ['core', 'full', 'new', 'core_new']:
         print(f"\n{mode.upper()} Mode:")
         summary = results[mode]['summary']
         best = summary.iloc[0]
