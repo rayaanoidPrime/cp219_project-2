@@ -130,6 +130,56 @@ class Task3BinaryDetection:
         else:
             raise ValueError(f"Unknown mode: {mode}. Must be 'core', 'full', 'new', or 'core_new'")
         print(f"{'='*70}\n")
+
+    def filter_features_by_importance(self, attack_type: str, features: List[str], mode: str) -> List[str]:
+        """
+        Filter features based on importance threshold from Task 1 results.
+        
+        Args:
+            attack_type: Attack type name (or 'combined')
+            features: List of all available features
+            mode: Current mode ('core', 'full', 'new', 'core_new')
+        
+        Returns:
+            Filtered list of features to keep
+        """
+        # Path to feature importance file from Task 2
+        importance_file = Path(f'outputs/tables/task2_{mode}/feature_importance_{attack_type}.csv')
+        
+        if not importance_file.exists():
+            print(f"    WARNING: Feature importance file not found: {importance_file}")
+            print(f"    Using all {len(features)} features (no filtering)")
+            return features
+        
+        # Load feature importance
+        try:
+            importance_df = pd.read_csv(importance_file)
+            
+            # Get threshold from config
+            threshold = self.config.get('feature_engineering', {}).get('importance_threshold', 0.0)
+            print(f"    Applying feature importance threshold: {threshold}")
+            
+            # Filter features above threshold
+            important_features = importance_df[importance_df['PCA_Importance'] >= threshold]['Feature'].tolist()
+            
+            # Keep only features that are in our current feature list
+            filtered_features = [f for f in features if f in important_features]
+            
+            if len(filtered_features) == 0:
+                print(f"    WARNING: No features passed threshold {threshold}!")
+                print(f"    Falling back to top 10 features")
+                top_features = importance_df.nlargest(10, 'Importance')['Feature'].tolist()
+                filtered_features = [f for f in features if f in top_features]
+            
+            print(f"    Features: {len(features)} -> {len(filtered_features)} (kept {len(filtered_features)/len(features)*100:.1f}%)")
+            print(f"    Kept features: {filtered_features}")
+            
+            return filtered_features
+            
+        except Exception as e:
+            print(f"    ERROR loading feature importance: {e}")
+            print(f"    Using all {len(features)} features (no filtering)")
+            return features
         
     def load_attack_data(self, attack_type: str):
         """Load and preprocess data for a single attack type."""
@@ -253,6 +303,18 @@ class Task3BinaryDetection:
         X_test = X_test[final_valid_cols]
         
         print(f"  Features after cleaning: {len(X_train.columns)}")
+        
+        # ===== Filter features by importance =====
+        print("  Filtering features by importance...")
+        feature_names = list(X_train.columns)
+        filtered_features = self.filter_features_by_importance(attack_type, feature_names, self.mode)
+        
+        # Apply filtering
+        X_train = X_train[filtered_features]
+        X_test = X_test[filtered_features]
+        print(f"  Features after importance filtering: {len(X_train.columns)}")
+        # ===============================================
+        
         print(f"  Train samples: {len(X_train)}, Attack ratio: {y_train.mean():.2%}")
         print(f"  Test samples: {len(X_test)}, Attack ratio: {y_test.mean():.2%}")
         

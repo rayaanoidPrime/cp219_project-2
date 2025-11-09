@@ -734,6 +734,57 @@ class Task4MultiClassDetection:
         )
         
         return train_df, test_df
+
+
+    def filter_features_by_importance(self, features: List[str], mode: str) -> List[str]:
+        """
+        Filter features based on importance threshold from Task 1 results.
+        Uses combined dataset feature importance for multi-class detection.
+        
+        Args:
+            features: List of all available features
+            mode: Current mode ('core', 'full', 'new', 'core_new')
+        
+        Returns:
+            Filtered list of features to keep
+        """
+        # Path to feature importance file from Task 1 (use combined dataset)
+        importance_file = Path(f'outputs/tables/task1_{mode}/feature_importance_combined.csv')
+        
+        if not importance_file.exists():
+            print(f"    WARNING: Feature importance file not found: {importance_file}")
+            print(f"    Using all {len(features)} features (no filtering)")
+            return features
+        
+        # Load feature importance
+        try:
+            importance_df = pd.read_csv(importance_file)
+            
+            # Get threshold from config
+            threshold = self.config.get('feature_engineering', {}).get('threshold', 0.0)
+            print(f"    Applying feature importance threshold: {threshold}")
+            
+            # Filter features above threshold
+            important_features = importance_df[importance_df['Importance'] >= threshold]['Feature'].tolist()
+            
+            # Keep only features that are in our current feature list
+            filtered_features = [f for f in features if f in important_features]
+            
+            if len(filtered_features) == 0:
+                print(f"    WARNING: No features passed threshold {threshold}!")
+                print(f"    Falling back to top 10 features")
+                top_features = importance_df.nlargest(10, 'Importance')['Feature'].tolist()
+                filtered_features = [f for f in features if f in top_features]
+            
+            print(f"    Features: {len(features)} -> {len(filtered_features)} (kept {len(filtered_features)/len(features)*100:.1f}%)")
+            print(f"    Kept features: {filtered_features}")
+            
+            return filtered_features
+            
+        except Exception as e:
+            print(f"    ERROR loading feature importance: {e}")
+            print(f"    Using all {len(features)} features (no filtering)")
+            return features
     
     def preprocess_data(self, train_df, test_df):
         """Preprocess data for multi-class detection."""
@@ -804,6 +855,17 @@ class Task4MultiClassDetection:
         X_test = X_test[final_valid_cols]
         
         print(f"  Features after cleaning: {len(X_train.columns)}")
+        
+        # ===== NEW: Filter features by importance =====
+        print("  Filtering features by importance...")
+        feature_names = list(X_train.columns)
+        filtered_features = self.filter_features_by_importance(feature_names, self.mode)
+        
+        # Apply filtering
+        X_train = X_train[filtered_features]
+        X_test = X_test[filtered_features]
+        print(f"  Features after importance filtering: {len(X_train.columns)}")
+        # ===============================================
         
         # Store feature names
         feature_names = list(X_train.columns)
