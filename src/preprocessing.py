@@ -2,9 +2,10 @@
 Preprocessing.py code for dataset loading and feature engineering.
 """
 
+from pathlib import Path
 import numpy as np
 import pandas as pd
-from typing import List
+from typing import List, Tuple
 
 # Core GOOSE protocol fields
 CORE_FIELDS: List[str] = [
@@ -515,5 +516,175 @@ def load_combined_datasets(data_dir, train_files: dict, test_files: dict, mode: 
     print(f"\n  Combined datasets:")
     print(f"    Total Train: {len(combined_train)}, Attack ratio: {combined_train['attack'].mean():.2%}")
     print(f"    Total Test: {len(combined_test)}, Attack ratio: {combined_test['attack'].mean():.2%}")
+    
+    return combined_train, combined_test
+
+def load_combined_datasets_multiclass(
+    data_dir: Path, 
+    train_files: dict, 
+    test_files: dict, 
+    mode: str = 'core'
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load and combine all attack datasets for MULTI-CLASS detection (Task 4).
+    
+    Key difference from load_combined_datasets():
+    - Normal samples (attack=0) are labeled as 'Normal' regardless of source dataset
+    - Attack samples (attack=1) are labeled with their specific attack type
+    
+    This gives us 5 classes: Normal, Injection, Masquerade, Poisoning, Replay
+    
+    Args:
+        data_dir: Path to data directory
+        train_files: Dict mapping attack_type -> train filename
+        test_files: Dict mapping attack_type -> test filename
+        mode: 'core' or 'full'
+    
+    Returns:
+        Tuple of (combined_train_df, combined_test_df) with 'attack_type' column
+        containing multi-class labels
+    """
+    data_dir = Path(data_dir)
+    train_dfs = []
+    test_dfs = []
+    
+    print("\nLoading datasets for multi-class detection...")
+    print("(Normal samples will be labeled as 'Normal', attacks by their type)")
+    
+    for attack_type in train_files.keys():
+        print(f"\n  Loading {attack_type} dataset...")
+        
+        # Load train
+        train_file = data_dir / train_files[attack_type]
+        train_df = pd.read_csv(train_file)
+        
+        # Load test
+        test_file = data_dir / test_files[attack_type]
+        test_df = pd.read_csv(test_file)
+        
+        print(f"    Raw: Train={len(train_df)}, Test={len(test_df)}")
+        
+        # Select fields based on mode
+        if mode == 'core':
+            keep_train = [c for c in CORE_FIELDS if c in train_df.columns]
+            keep_test = [c for c in CORE_FIELDS if c in test_df.columns]
+        else:  # full mode
+            keep_train = [c for c in ALLOWED_FIELDS if c in train_df.columns]
+            keep_test = [c for c in ALLOWED_FIELDS if c in test_df.columns]
+        
+        train_df = train_df[keep_train].copy()
+        test_df = test_df[keep_test].copy()
+        
+        # Apply preprocessing
+        train_df = preprocess_dataframe(train_df)
+        train_df = standardize_schema(train_df)
+        test_df = preprocess_dataframe(test_df)
+        test_df = standardize_schema(test_df)
+        
+        # Engineer features (only in full mode)
+        if mode == 'full':
+            train_df = engineer_features(train_df)
+            test_df = engineer_features(test_df)
+        
+        # CRITICAL: Check that 'attack' column exists
+        if 'attack' not in train_df.columns or 'attack' not in test_df.columns:
+            print(f"    ERROR: 'attack' column missing!")
+            print(f"    Train columns: {list(train_df.columns)}")
+            continue
+        
+        # Separate normal and attack samples
+        train_normal = train_df[train_df['attack'] == 0].copy()
+        train_attack = train_df[train_df['attack'] == 1].copy()
+        
+        test_normal = test_df[test_df['attack'] == 0].copy()
+        test_attack = test_df[test_df['attack'] == 1].copy()
+        
+        print(f"    Train: {len(train_normal)} normal, {len(train_attack)} attack")
+        print(f"    Test:  {len(test_normal)} normal, {len(test_attack)} attack")
+        
+        # Label samples for multi-class classification
+        # Normal samples -> 'Normal' (capitalized to match attack type format)
+        train_normal['attack_type'] = 'Normal'
+        test_normal['attack_type'] = 'Normal'
+        
+        # Attack samples -> specific attack type (capitalize first letter)
+        attack_label = attack_type.capitalize()
+        train_attack['attack_type'] = attack_label
+        test_attack['attack_type'] = attack_label
+        
+        # Combine normal and attack for this dataset
+        train_combined = pd.concat([train_normal, train_attack], ignore_index=True)
+        test_combined = pd.concat([test_normal, test_attack], ignore_index=True)
+        
+        train_dfs.append(train_combined)
+        test_dfs.append(test_combined)
+        
+        print(f"    Added to pool: {attack_label}")
+    
+    # Combine all datasets
+    combined_train = pd.concat(train_dfs, ignore_index=True)
+    combined_test = pd.concat(test_dfs, ignore_index=True)
+    
+    print(f"\n{'='*70}")
+    print("MULTI-CLASS DATASET SUMMARY")
+    print(f"{'='*70}")
+    print(f"  Total Train: {len(combined_train)}")
+    print(f"  Total Test:  {len(combined_test)}")
+    
+    # Show distribution
+    print(f"\n  Train distribution by attack_type:")
+    train_dist = combined_train['attack_type'].value_counts().sort_index()
+    for attack_type, count in train_dist.items():
+        pct = count / len(combined_train) * 100
+        print(f"    {attack_type:12s}: {count:6d} ({pct:5.2f}%)")
+    
+    print(f"\n  Test distribution by attack_type:")
+    test_dist = combined_test['attack_type'].value_counts().sort_index()
+    for attack_type, count in test_dist.items():
+        pct = count / len(combined_test) * 100
+        print(f"    {attack_type:12s}: {count:6d} ({pct:5.2f}%)")
+    
+    # Verify expected distributions (based on your official numbers)
+    print(f"\n  Verification against expected counts:")
+    
+    expected_train = {
+        'Normal': 27958,      # 9995 + 6639 + 8309 + 3015
+        'Injection': 100,
+        'Masquerade': 100,
+        'Poisoning': 2000,
+        'Replay': 100
+    }
+    
+    expected_test = {
+        'Normal': 27952,      # 10123 + 6366 + 8357 + 3106
+        'Injection': 100,
+        'Masquerade': 100,
+        'Poisoning': 2000,
+        'Replay': 100
+    }
+    
+    all_correct = True
+    for attack_type in sorted(expected_train.keys()):
+        train_count = train_dist.get(attack_type, 0)
+        test_count = test_dist.get(attack_type, 0)
+        
+        train_expected = expected_train.get(attack_type, 0)
+        test_expected = expected_test.get(attack_type, 0)
+        
+        train_match = "✓" if train_count == train_expected else "✗"
+        test_match = "✓" if test_count == test_expected else "✗"
+        
+        if train_count != train_expected or test_count != test_expected:
+            all_correct = False
+        
+        print(f"    {attack_type:12s}:")
+        print(f"      Train: {train_count:6d} / {train_expected:6d} {train_match}")
+        print(f"      Test:  {test_count:6d} / {test_expected:6d} {test_match}")
+    
+    if not all_correct:
+        print(f"\n  ✗ WARNING: Distributions don't match expected values!")
+        print(f"     Check that 'attack' column uses 0=normal, 1=attack encoding")
+    
+    print(f"{'='*70}\n")
     
     return combined_train, combined_test
