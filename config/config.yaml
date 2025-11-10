@@ -26,7 +26,7 @@ feature_engineering:
   temporal_features: true
   statistical_features: true
   custom_features: true
-  importance_threshold: 0.15 # Threshold for feature selection  
+  importance_threshold: 0.0 # Threshold for feature selection  
 # New: Dimensionality reduction pipeline
 dimensionality_reduction:
   enabled: true

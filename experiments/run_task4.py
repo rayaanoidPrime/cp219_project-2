@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.tasks.task4_multiclass_detection import run_task4
 from src.utils.wandb_utils import WandbLogger
 
+MODE = ['full']
 
 def main():
     """Main execution function."""
@@ -49,6 +50,12 @@ def main():
         type=str,
         default=None,
         help='Custom W&B run name'
+    )
+    parser.add_argument(
+        '--mode',
+        type=str,
+        default="full",
+        help='comma separated list of modes to run: core, full, new, core_new'
     )
     
     args = parser.parse_args()
@@ -124,6 +131,15 @@ def main():
             print(f"Warning: Failed to initialize W&B: {e}")
             print("Continuing without W&B logging...\n")
             logger = None
+
+    # override mode if specified
+    if args.mode:
+        mode_list = [t.strip() for t in args.mode.split(',')]
+        if any(m not in ['core', 'full', "new", "core_new"] for m in mode_list):
+            print(f"\nError: Invalid mode specified: {args.mode}")
+            print("Valid modes are 'core', 'full', 'new', 'core_new', or a comma-separated combination.")
+            sys.exit(1)
+        config['mode'] = mode_list 
     
     # Run Task 4
     try:
@@ -138,7 +154,7 @@ def main():
         print("="*70)
         
         # Print summary for both modes
-        for mode in ['core', 'full']:
+        for mode in config['mode']:
             print(f"\n{mode.upper()} Mode Results:")
             summary = results[mode]['summary']
             best = summary.iloc[0]
@@ -175,7 +191,7 @@ def main():
         print("  Models:  outputs/models/task4_full/")
         
         # List key generated files
-        for mode in ['core', 'full']:
+        for mode in config['mode']:
             fig_dir = Path(f'outputs/figures/task4_{mode}')
             if fig_dir.exists():
                 key_figures = [
@@ -194,39 +210,39 @@ def main():
         if logger:
             print(f"\nW&B Dashboard: {logger.run.url}")
         
-        print("\n" + "="*70)
-        print("KEY INSIGHTS")
-        print("="*70)
+        # print("\n" + "="*70)
+        # print("KEY INSIGHTS")
+        # print("="*70)
         
-        # Compare modes
-        core_best_f1 = results['core']['summary'].iloc[0]['F1-Score (Macro)']
-        full_best_f1 = results['full']['summary'].iloc[0]['F1-Score (Macro)']
+        # # Compare modes
+        # core_best_f1 = results['core']['summary'].iloc[0]['F1-Score (Macro)']
+        # full_best_f1 = results['full']['summary'].iloc[0]['F1-Score (Macro)']
         
-        print(f"\nFeature Impact:")
-        print(f"  CORE mode (10 features): F1 = {core_best_f1:.4f}")
-        print(f"  FULL mode (all features): F1 = {full_best_f1:.4f}")
-        improvement = ((full_best_f1 - core_best_f1) / core_best_f1) * 100
-        print(f"  Improvement: {improvement:+.2f}%")
+        # print(f"\nFeature Impact:")
+        # print(f"  CORE mode (10 features): F1 = {core_best_f1:.4f}")
+        # print(f"  FULL mode (all features): F1 = {full_best_f1:.4f}")
+        # improvement = ((full_best_f1 - core_best_f1) / core_best_f1) * 100
+        # print(f"  Improvement: {improvement:+.2f}%")
         
-        # Identify hardest attack to detect
-        print(f"\nAttack Detectability (FULL mode):")
-        best_full = results['full']['summary'].iloc[0]
-        attack_f1s = {
-            'Normal': best_full['F1_normal'],
-            'Injection': best_full['F1_injection'],
-            'Masquerade': best_full['F1_masquerade'],
-            'Poisoning': best_full['F1_poisoning'],
-            'Replay': best_full['F1_replay']
-        }
-        sorted_attacks = sorted(attack_f1s.items(), key=lambda x: x[1], reverse=True)
-        for attack, f1 in sorted_attacks:
-            print(f"  {attack:12s}: {f1:.4f}")
+        # # Identify hardest attack to detect
+        # print(f"\nAttack Detectability (FULL mode):")
+        # best_full = results['full']['summary'].iloc[0]
+        # attack_f1s = {
+        #     'Normal': best_full['F1_normal'],
+        #     'Injection': best_full['F1_injection'],
+        #     'Masquerade': best_full['F1_masquerade'],
+        #     'Poisoning': best_full['F1_poisoning'],
+        #     'Replay': best_full['F1_replay']
+        # }
+        # sorted_attacks = sorted(attack_f1s.items(), key=lambda x: x[1], reverse=True)
+        # for attack, f1 in sorted_attacks:
+        #     print(f"  {attack:12s}: {f1:.4f}")
         
-        print(f"\nRecommendations:")
-        print(f"  • Best overall model: {results['full']['summary'].iloc[0]['Model']}")
-        print(f"  • Hardest to detect: {sorted_attacks[-1][0]} (F1={sorted_attacks[-1][1]:.4f})")
-        print(f"  • Most reliable: {sorted_attacks[0][0]} (F1={sorted_attacks[0][1]:.4f})")
-        print(f"  • Review confusion matrices for class-specific insights")
+        # print(f"\nRecommendations:")
+        # print(f"  • Best overall model: {results['full']['summary'].iloc[0]['Model']}")
+        # print(f"  • Hardest to detect: {sorted_attacks[-1][0]} (F1={sorted_attacks[-1][1]:.4f})")
+        # print(f"  • Most reliable: {sorted_attacks[0][0]} (F1={sorted_attacks[0][1]:.4f})")
+        # print(f"  • Review confusion matrices for class-specific insights")
         
     except Exception as e:
         print("\n" + "="*70)

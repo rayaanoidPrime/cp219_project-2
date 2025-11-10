@@ -44,6 +44,7 @@ from src.preprocessing import (
 )
 
 
+
 class MultiClassDetector:
     """
     Updated MultiClassDetector with proper Hierarchical Clustering support.
@@ -749,7 +750,7 @@ class Task4MultiClassDetection:
             Filtered list of features to keep
         """
         # Path to feature importance file from Task 1 (use combined dataset)
-        importance_file = Path(f'outputs/tables/task1_{mode}/feature_importance_combined.csv')
+        importance_file = Path(f'outputs/tables/task2_{mode}/feature_importance_scores.csv')
         
         if not importance_file.exists():
             print(f"    WARNING: Feature importance file not found: {importance_file}")
@@ -761,11 +762,11 @@ class Task4MultiClassDetection:
             importance_df = pd.read_csv(importance_file)
             
             # Get threshold from config
-            threshold = self.config.get('feature_engineering', {}).get('threshold', 0.0)
+            threshold = self.config.get('feature_engineering', {}).get('importance_threshold', 0.0)
             print(f"    Applying feature importance threshold: {threshold}")
             
             # Filter features above threshold
-            important_features = importance_df[importance_df['Importance'] >= threshold]['Feature'].tolist()
+            important_features = importance_df[importance_df['PCA_Importance'] >= threshold]['Feature'].tolist()
             
             # Keep only features that are in our current feature list
             filtered_features = [f for f in features if f in important_features]
@@ -1516,7 +1517,7 @@ def run_task4(config: Dict[str, Any], logger=None) -> Dict:
     
     # Run both modes: CORE (10 features) and FULL (all features)
     # Run all four modes
-    for mode in ['core', 'full', 'new', 'core_new']:
+    for mode in config['mode']:
         print(f"\n{'#'*70}")
         print(f"# STARTING {mode.upper()} MODE ANALYSIS")
         print(f"{'#'*70}\n")
@@ -1584,7 +1585,7 @@ def run_task4(config: Dict[str, Any], logger=None) -> Dict:
     print("TASK 4 COMPLETE - BOTH MODES FINISHED")
     print("="*70)
     print("\nComparison between modes:")
-    for mode in ['core', 'full', 'new', 'core_new']:
+    for mode in config['mode']:
         best_f1 = results[mode]['summary'].iloc[0]['F1-Score (Macro)']
         best_model = results[mode]['summary'].iloc[0]['Model']
         print(f"  {mode.upper():10s} best F1-Macro: {best_f1:.4f} ({best_model})")
@@ -1592,7 +1593,7 @@ def run_task4(config: Dict[str, Any], logger=None) -> Dict:
     print("\nPer-class performance (best models):")
     class_names = ['normal', 'injection', 'masquerade', 'poisoning', 'replay']
 
-    for mode in ['core', 'full', 'new', 'core_new']:
+    for mode in config['mode']:
         best = results[mode]['summary'].iloc[0]
         print(f"\n  {mode.upper()} mode ({best['Model']}):")
         for class_name in class_names:
@@ -1600,7 +1601,7 @@ def run_task4(config: Dict[str, Any], logger=None) -> Dict:
             print(f"    {class_name:12s}: {f1_score:.4f}")
 
     print("\nResults saved to:")
-    for mode in ['core', 'full', 'new', 'core_new']:
+    for mode in config['mode']:
         print(f"  - outputs/figures/task4_{mode}/ and outputs/tables/task4_{mode}/")
     
     return results
@@ -1649,7 +1650,7 @@ if __name__ == '__main__':
     
     class_names = ['normal', 'injection', 'masquerade', 'poisoning', 'replay']
     
-    for mode in ['core', 'full', 'new', 'core_new']:
+    for mode in config['mode']:
         print(f"\n{mode.upper()} Mode:")
         summary = results[mode]['summary']
         best = summary.iloc[0]

@@ -654,8 +654,11 @@ def run_task2(config: Dict[str, Any], logger=None) -> Dict:
     """
     results = {}
     
+    if not config.get('mode'):
+        config['mode'] = ['core', 'full', 'new', 'core_new']
+
     # Run all modes
-    for mode in ['core', 'full', 'new', 'core_new']:
+    for mode in config['mode']:
         print(f"\n{'#'*70}")
         print(f"# STARTING {mode.upper()} MODE ANALYSIS")
         print(f"{'#'*70}\n")
@@ -689,7 +692,7 @@ def run_task2(config: Dict[str, Any], logger=None) -> Dict:
     print("TASK 2 COMPLETE - ALL MODES FINISHED")
     print("="*70)
     print("\nResults available in:")
-    for mode in ['core', 'full', 'new', 'core_new']:
+    for mode in config['mode']:
         print(f"  - outputs/figures/task2_{mode}/ and outputs/tables/task2_{mode}/")
     
     return results

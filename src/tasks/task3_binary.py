@@ -4,6 +4,9 @@ Compare multiple unsupervised models for binary classification (Normal vs Attack
 Trains separate models for each attack type for better attack-specific insights.
 """
 
+import io
+import pickle
+import joblib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -35,6 +38,7 @@ from src.preprocessing import (
 )
 
 
+
 class BinaryDetector:
     """Base class for binary anomaly detectors."""
     
@@ -42,8 +46,9 @@ class BinaryDetector:
         self.name = name
         self.model = model
         self.config = config or {}
-        self.train_time = 0
-        self.inference_time = 0
+        self.train_time = 0.0                 # total training time in seconds
+        self.inference_time_total = 0.0       # total inference time (seconds) for last predict call
+        self.inference_time_per_sample = 0.0
         self.train_labels_ = None  # Store training labels for DBSCAN
         
     def fit(self, X):
@@ -51,8 +56,8 @@ class BinaryDetector:
         start = time.time()
         
         if isinstance(self.model, DBSCAN):
-            # DBSCAN fits and labels in one step
-            self.train_labels_ = self.model.fit_predict(X)
+            # dont fit dbscan during training
+            self.train_labels_ = None
         else:
             self.model.fit(X)
             
@@ -61,36 +66,65 @@ class BinaryDetector:
     
     def predict(self, X):
         """Predict anomalies."""
+        
+        X_arr = np.asarray(X)
+        n = X_arr.shape[0]
         start = time.time()
         
         # Handle DBSCAN separately
         if isinstance(self.model, DBSCAN):
             # DBSCAN doesn't have predict() - use fit_predict on test data
-            predictions = self.model.fit_predict(X)
+            raw_preds = self.model.fit_predict(X_arr)
         else:
-            predictions = self.model.predict(X)
+            raw_preds = self.model.predict(X_arr)
         
-        self.inference_time = (time.time() - start) / len(X)
+        total = time.time() - start
+        self.inference_time_total = total
+        self.inference_time_per_sample = (total / n) if n > 0 else 0.0
         
-        # Convert to binary (0=normal, 1=attack)
+        # Convert raw_preds to binary 0=normal, 1=attack
         if isinstance(self.model, (IsolationForest, OneClassSVM)):
-            # These use -1 for anomalies, 1 for normal
-            predictions = np.where(predictions == -1, 1, 0)
+            preds = np.where(raw_preds == -1, 1, 0)
         elif isinstance(self.model, DBSCAN):
-            # DBSCAN: -1 = noise/outliers (treat as attacks), others = clusters (normal)
-            predictions = np.where(predictions == -1, 1, 0)
+            # DBSCAN labels: -1 = noise/outlier -> treat as attack
+            preds = np.where(raw_preds == -1, 1, 0)
         elif isinstance(self.model, (KMeans, GaussianMixture)):
-            # For clustering: assume smaller cluster is attacks
-            unique, counts = np.unique(predictions, return_counts=True)
-            minority_cluster = unique[np.argmin(counts)]
-            predictions = np.where(predictions == minority_cluster, 1, 0)
-        
-        return predictions
+            unique, counts = np.unique(raw_preds, return_counts=True)
+            if len(unique) == 1:
+                preds = np.zeros_like(raw_preds)  # degenerate: everything same cluster -> normal
+            else:
+                minority_cluster = unique[np.argmin(counts)]
+                preds = np.where(raw_preds == minority_cluster, 1, 0)
+        else:
+            preds = raw_preds  # fallback (should not happen)
+
+        return preds
     
     def get_memory_mb(self):
-        """Estimate memory footprint."""
-        import sys
-        return sys.getsizeof(self.model) / (1024 * 1024)
+        """
+        Estimate the model's memory footprint via direct pickling into bytes.
+        This returns the size (MB) of pickle.dumps(self.model).
+        NOTE: this is a reliable quick estimate. If you prefer the on-disk joblib dump
+        size, serialize to a TemporaryFile via joblib.dump and measure that file instead.
+        """
+        try:
+            serialized = pickle.dumps(self.model, protocol=pickle.HIGHEST_PROTOCOL)
+            mem_bytes = len(serialized)
+            return mem_bytes / (1024.0 * 1024.0)
+        except Exception:
+            # fallback: try joblib to a temporary file (if pickle fails)
+            import tempfile, joblib, os
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                joblib.dump(self.model, tmp_path)
+                mem_bytes = os.path.getsize(tmp_path)
+                return mem_bytes / (1024.0 * 1024.0)
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
 
 class Task3BinaryDetection:
@@ -144,7 +178,7 @@ class Task3BinaryDetection:
             Filtered list of features to keep
         """
         # Path to feature importance file from Task 2
-        importance_file = Path(f'outputs/tables/task2_{mode}/feature_importance_{attack_type}.csv')
+        importance_file = Path(f'outputs/tables/task2_{mode}/feature_importance_scores.csv')
         
         if not importance_file.exists():
             print(f"    WARNING: Feature importance file not found: {importance_file}")
@@ -369,14 +403,14 @@ class Task3BinaryDetection:
                     covariance_type='full'
                 )
             ),
-            # 'DBSCAN': BinaryDetector(
-            #     'DBSCAN',
-            #     DBSCAN(
-            #         eps=3.0,
-            #         min_samples=50,
-            #         n_jobs=-1
-            #     )
-            # )
+            'DBSCAN': BinaryDetector(
+                'DBSCAN',
+                DBSCAN(
+                    eps=3.0,
+                    min_samples=50,
+                    n_jobs=-1
+                )
+            )
         }
         
         return models
@@ -444,9 +478,6 @@ class Task3BinaryDetection:
         """Evaluate a single model."""
         y_pred = model.predict(X_test)
         
-        # Handle DBSCAN outliers (-1) as attacks
-        if isinstance(model.model, DBSCAN):
-            y_pred = np.where(y_pred == -1, 1, 0)
         
         # Calculate metrics
         accuracy = accuracy_score(y_test, y_pred)
@@ -469,7 +500,8 @@ class Task3BinaryDetection:
                 'f1_weighted': f1_weighted,
                 'confusion_matrix': confusion_matrix(y_test, y_pred),
                 'train_time': model.train_time,
-                'inference_time_ms': model.inference_time * 1000,
+                'inference_time_ms_per_sample': model.inference_time_per_sample * 1000,
+                'inference_time_ms_total': model.inference_time_total * 1000,
                 'memory_mb': model.get_memory_mb()
             }
         else:
@@ -483,7 +515,8 @@ class Task3BinaryDetection:
                 'f1_score': f1,
                 'confusion_matrix': confusion_matrix(y_test, y_pred),
                 'train_time': model.train_time,
-                'inference_time_ms': model.inference_time * 1000,
+                'inference_time_ms_per_sample': model.inference_time_per_sample * 1000,
+                'inference_time_ms_total': model.inference_time_total * 1000,
                 'memory_mb': model.get_memory_mb()
             }
     
@@ -526,7 +559,8 @@ class Task3BinaryDetection:
                     'Recall': metrics['recall'],
                     'F1-Score': metrics['f1_score'],
                     'Train Time (s)': metrics['train_time'],
-                    'Inference Time (ms)': metrics['inference_time_ms'],
+                    'Inference Time (ms/packet)': metrics['inference_time_ms_per_sample'],
+                    'Inference Time (total ms)': metrics['inference_time_ms_total'],
                     'Memory (MB)': metrics['memory_mb']
                 }
                 results.append(result)
@@ -537,9 +571,10 @@ class Task3BinaryDetection:
                 print(f"    Precision: {metrics['precision']:.4f}")
                 print(f"    Recall:    {metrics['recall']:.4f}")
                 print(f"    F1-Score:  {metrics['f1_score']:.4f}")
-                
-                
-                
+                print(f"    Inference Time (total ms): {metrics['inference_time_ms_total']:.3f}")
+                print(f"    Inference Time (ms/packet): {metrics['inference_time_ms_per_sample']:.6f}")
+                print(f"    Memory Footprint (MB):    {metrics['memory_mb']:.4f}")
+                                
                 # Save model
                 import joblib
                 attack_model_dir = self.model_dir / attack_type
@@ -740,7 +775,7 @@ class Task3BinaryDetection:
             'Recall': ['mean', 'std'],
             'F1-Score': ['mean', 'std'],
             'Train Time (s)': 'mean',
-            'Inference Time (ms)': 'mean',
+            'Inference Time (ms/packet)': 'mean',
             'Memory (MB)': 'mean'
         }).round(4)
         
@@ -987,7 +1022,7 @@ def run_task3(config: Dict[str, Any], logger=None) -> Dict:
     attack_types = ['replay', 'masquerade', 'injection', 'poisoning']
     
     # Run all modes
-    for mode in ['core', 'full', 'new', 'core_new']:
+    for mode in config["mode"]:
         print(f"\n{'#'*70}")
         print(f"# STARTING {mode.upper()} MODE ANALYSIS (PER-ATTACK TRAINING)")
         print(f"{'#'*70}\n")
@@ -1028,43 +1063,43 @@ def run_task3(config: Dict[str, Any], logger=None) -> Dict:
             print(f"\n✓ Completed {attack_type} attack analysis")
         
         # ===== COMBINED DATASET TRAINING =====
-        print(f"\n{'*'*70}")
-        print(f"* PROCESSING COMBINED DATASET")
-        print(f"{'*'*70}")
+        # print(f"\n{'*'*70}")
+        # print(f"* PROCESSING COMBINED DATASET")
+        # print(f"{'*'*70}")
         
-        # Load combined data
-        print("\nLoading combined dataset...")
-        train_combined, test_combined = load_combined_datasets(
-            Path(config['data']['raw_dir']),
-            config['data']['train_files'],
-            config['data']['test_files'],
-            mode=mode
-        )
+        # # Load combined data
+        # print("\nLoading combined dataset...")
+        # train_combined, test_combined = load_combined_datasets(
+        #     Path(config['data']['raw_dir']),
+        #     config['data']['train_files'],
+        #     config['data']['test_files'],
+        #     mode=mode
+        # )
         
-        # Preprocess combined data
-        X_train_comb, y_train_comb, X_test_comb, y_test_comb, features_comb, scaler_comb = \
-            task3.preprocess_attack_data(train_combined, test_combined, 'combined')
+        # # Preprocess combined data
+        # X_train_comb, y_train_comb, X_test_comb, y_test_comb, features_comb, scaler_comb = \
+        #     task3.preprocess_attack_data(train_combined, test_combined, 'combined')
         
-        # Train and evaluate on combined dataset
-        results_df_comb, all_predictions_comb = task3.train_and_evaluate_combined(
-            X_train_comb, y_train_comb, X_test_comb, y_test_comb,
-            test_combined,  # Pass the full test DataFrame
-            scaler_comb,    # Pass the scaler
-            features_comb   # Pass the feature names
-        )
+        # # Train and evaluate on combined dataset
+        # results_df_comb, all_predictions_comb = task3.train_and_evaluate_combined(
+        #     X_train_comb, y_train_comb, X_test_comb, y_test_comb,
+        #     test_combined,  # Pass the full test DataFrame
+        #     scaler_comb,    # Pass the scaler
+        #     features_comb   # Pass the feature names
+        # )
         
-        # Visualize combined results
-        task3.visualize_combined_results(
-            results_df_comb, X_test_comb, y_test_comb, all_predictions_comb
-        )
+        # # Visualize combined results
+        # task3.visualize_combined_results(
+        #     results_df_comb, X_test_comb, y_test_comb, all_predictions_comb
+        # )
         
-        # Generate combined dataset summary
-        results_df_comb = task3.generate_combined_summary(results_df_comb)
+        # # Generate combined dataset summary
+        # results_df_comb = task3.generate_combined_summary(results_df_comb)
         
-        # Add to results
-        all_attack_results['combined'] = results_df_comb
+        # # Add to results
+        # all_attack_results['combined'] = results_df_comb
         
-        print(f"\n✓ Completed combined dataset analysis")
+        # print(f"\n✓ Completed combined dataset analysis")
         
         # Generate cross-attack summary (excluding combined)
         attack_only_results = {k: v for k, v in all_attack_results.items() if k != 'combined'}
@@ -1073,20 +1108,20 @@ def run_task3(config: Dict[str, Any], logger=None) -> Dict:
         # Log to W&B
         if logger:
             logger.log_dataframe(summary_df, f"task3_{mode}/cross_attack_summary")
-            logger.log_dataframe(results_df_comb, f"task3_{mode}/combined_summary")
+            # logger.log_dataframe(results_df_comb, f"task3_{mode}/combined_summary")
         
         # Collect results for this mode
         results[mode] = {
             "summary": summary_df,
             "per_attack": all_attack_results,
-            "combined": results_df_comb
+            # "combined": results_df_comb
         }
 
     print("\n" + "="*70)
     print("TASK 3 COMPLETE - ALL MODES FINISHED")
     print("="*70)
     print("\nResults available in:")
-    for mode in ['core', 'full', 'new', 'core_new']:
+    for mode in config["mode"]:
         print(f"  - outputs/figures/task3_{mode}/ and outputs/tables/task3_{mode}/")
     
     return results

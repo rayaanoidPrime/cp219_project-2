@@ -35,6 +35,7 @@ ALLOWED_FIELDS: List[str] = [
     "bit-string",
     "attack",
 
+
     # Message timing intervals
     "Epoch Time",
     "Arrival Time",
@@ -46,6 +47,33 @@ ALLOWED_FIELDS: List[str] = [
     # Rate-based statistics
     "Frame length on the wire",
     "Frame length stored into the capture file",
+]
+
+
+ADVANCED_FIELDS: List[str] = [
+    # ethernet fields for graph based analysis
+    "Source",
+    "Destination",
+]
+
+UCAD_FEATURES = [
+    # Timing features
+    'inter_arrival', 'jitter_rolling_std', 'msg_rate', 'byte_rate',
+    
+    # Protocol compliance
+    'ttl_violation', 'ttl_margin', 'sqNum_jump', 'stNum_change',
+    
+    # Length dynamics
+    'length_delta', 'Length', 'Frame length on the wire',
+    
+    # GOOSE rule violations
+    'sq_reset_violation', 't_st_consistency_violation',
+    'status_change_missing_on_event', 'heartbeat_interval_error',
+    'sq_inc_violation_when_no_event', 'status_change_violation_on_heartbeat',
+    'stNum_jump_gt1', 'sq_reset_without_st_change',
+    
+    # Event context
+    'event_msg_rank'
 ]
 
 _EPS = 1e-6
@@ -177,7 +205,7 @@ def standardize_schema(df: pd.DataFrame) -> pd.DataFrame:
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Engineered features using ONLY allowed/raw fields.
-    Should be used only in 'full' mode.
+    Should be used only in 'full'or 'advanced' (ONLY TASK 5) mode.
     """
     df = df.copy()
 
@@ -560,8 +588,7 @@ def load_and_preprocess(filepath: str, mode: str = 'core') -> pd.DataFrame:
     
     return df
 
-
-def load_combined_datasets(data_dir, train_files: dict, test_files: dict, mode: str = 'core'):
+def load_combined_datasets(data_dir, train_files: dict, test_files: dict, mode: str = 'core', advanced: bool = False):
     """
     Load and combine all attack datasets into single training and test sets.
     
@@ -609,100 +636,9 @@ def load_combined_datasets(data_dir, train_files: dict, test_files: dict, mode: 
         else:
             raise ValueError(f"Unknown mode: {mode}. Must be 'core', 'full', 'new', or 'core_new'")
         
-        train_df = train_df[keep_train].copy()
-        test_df = test_df[keep_test].copy()
-        
-        # Apply preprocessing
-        train_df = preprocess_dataframe(train_df)
-        train_df = standardize_schema(train_df)
-        test_df = preprocess_dataframe(test_df)
-        test_df = standardize_schema(test_df)
-        
-        # Engineer features based on mode
-        if mode == 'full':
-            train_df = engineer_features(train_df)
-            test_df = engineer_features(test_df)
-        elif mode in ['new', 'core_new']:
-            train_df = engineer_features_new(train_df)
-            test_df = engineer_features_new(test_df)
-            
-            # CRITICAL: For 'new' mode, drop the original CORE numeric features
-            if mode == 'new':
-                core_numeric_to_drop = ['timeAllowedtoLive', 'stNum', 'sqNum', 'Length',
-                                    'boolean_1', 'boolean_2', 'boolean_3',
-                                    'bitstring_numeric', 'bitstring_bitcount']
-                train_df.drop(columns=[c for c in core_numeric_to_drop if c in train_df.columns], 
-                            inplace=True, errors='ignore')
-                test_df.drop(columns=[c for c in core_numeric_to_drop if c in test_df.columns], 
-                            inplace=True, errors='ignore')
-                print(f"    (NEW mode: dropped original core features, keeping only engineered)")
-
-        # Tag dataset rows with their attack source (required for balanced evaluation)
-        train_df['attack_type'] = attack_type
-        test_df['attack_type'] = attack_type
-        
-        train_dfs.append(train_df)
-        test_dfs.append(test_df)
-        
-        print(f"    {attack_type}: Train={len(train_df)}, Test={len(test_df)}")
-    
-    # Combine all datasets
-    combined_train = pd.concat(train_dfs, ignore_index=True)
-    combined_test = pd.concat(test_dfs, ignore_index=True)
-    
-    print(f"\n  Combined datasets:")
-    print(f"    Total Train: {len(combined_train)}, Attack ratio: {combined_train['attack'].mean():.2%}")
-    print(f"    Total Test: {len(combined_test)}, Attack ratio: {combined_test['attack'].mean():.2%}")
-    
-    return combined_train, combined_test
-
-def load_combined_datasets(data_dir, train_files: dict, test_files: dict, mode: str = 'core'):
-    """
-    Load and combine all attack datasets into single training and test sets.
-    
-    Args:
-        data_dir: Path to data directory
-        train_files: Dict mapping attack_type -> train filename
-        test_files: Dict mapping attack_type -> test filename
-        mode: 'core', 'full', 'new', or 'core_new'
-    
-    Returns:
-        Tuple of (combined_train_df, combined_test_df)
-    """
-    from pathlib import Path
-    
-    data_dir = Path(data_dir)
-    train_dfs = []
-    test_dfs = []
-    
-    print("\nLoading and combining all attack datasets...")
-    
-    for attack_type in train_files.keys():
-        print(f"  Loading {attack_type}...")
-        
-        # Load train
-        train_file = data_dir / train_files[attack_type]
-        train_df = pd.read_csv(train_file)
-        
-        # Load test
-        test_file = data_dir / test_files[attack_type]
-        test_df = pd.read_csv(test_file)
-        
-        # Select fields based on mode
-        if mode == 'core':
-            keep_train = [c for c in CORE_FIELDS if c in train_df.columns]
-            keep_test = [c for c in CORE_FIELDS if c in test_df.columns]
-        elif mode == 'full':
-            keep_train = [c for c in ALLOWED_FIELDS if c in train_df.columns]
-            keep_test = [c for c in ALLOWED_FIELDS if c in test_df.columns]
-        elif mode in ['new', 'core_new']:
-            # For new modes, we need minimal fields to generate new features
-            minimal_fields = ['gocbRef', 't', 'Time', 'stNum', 'sqNum', 
-                            'timeAllowedtoLive', 'boolean', 'bit-string', 'attack', 'Length']
-            keep_train = [c for c in minimal_fields if c in train_df.columns]
-            keep_test = [c for c in minimal_fields if c in test_df.columns]
-        else:
-            raise ValueError(f"Unknown mode: {mode}. Must be 'core', 'full', 'new', or 'core_new'")
+        if advanced:
+            keep_train += ADVANCED_FIELDS
+            keep_test += ADVANCED_FIELDS
         
         train_df = train_df[keep_train].copy()
         test_df = test_df[keep_test].copy()

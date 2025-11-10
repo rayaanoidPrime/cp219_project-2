@@ -56,6 +56,12 @@ def main():
         default=None,
         help='Custom W&B run name'
     )
+    parser.add_argument(
+        '--mode',
+        type=str,
+        default="full",
+        help='comma separated list of modes to run: core, full, new, core_new'
+    )
     
     args = parser.parse_args()
     
@@ -145,7 +151,15 @@ def main():
             print(f"Warning: Failed to initialize W&B: {e}")
             print("Continuing without W&B logging...")
             logger = None
-    
+
+    # override mode if specified
+    if args.mode:
+        mode_list = [t.strip() for t in args.mode.split(',')]
+        if any(m not in ['core', 'full', "new", "core_new"] for m in mode_list):
+            print(f"\nError: Invalid mode specified: {args.mode}")
+            print("Valid modes are 'core', 'full', 'new', 'core_new', or a comma-separated combination.")
+            sys.exit(1)
+        config['mode'] = mode_list    
     # Run Task 2
     try:
         print("Starting Task 2 analysis...")
