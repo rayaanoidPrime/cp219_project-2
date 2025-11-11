@@ -231,6 +231,301 @@ class AdvancedAnalyzerUCAD:
         # Analyze reconstruction errors
         self._analyze_reconstruction_errors(X_train, X_test, y_train, y_test)
 
+    # ==================== 1B. PER-ATTACK UCAD DETECTION ====================
+
+    def ucad_detection_per_attack(
+        self, 
+        epochs: int = 50, 
+        batch_size: int = 128,
+        contamination_rate: float = 0.076
+    ):
+        """
+        Train and evaluate UCAD separately for each attack type.
+        Compares per-attack performance vs combined detection.
+        """
+        print("\n" + "="*70)
+        print("1B. UCAD: PER-ATTACK TYPE DETECTION")
+        print("="*70)
+        
+        attack_types = list(self.config['data']['train_files'].keys())
+        per_attack_results = {}
+        
+        for attack_type in attack_types:
+            print(f"\n{'='*70}")
+            print(f"Training UCAD for: {attack_type.upper()}")
+            print(f"{'='*70}")
+            
+            # Load data for this specific attack
+            from src.preprocessing import load_and_preprocess
+            from pathlib import Path
+            
+            data_dir = Path(self.config['data']['raw_dir'])
+            train_file = data_dir / self.config['data']['train_files'][attack_type]
+            test_file = data_dir / self.config['data']['test_files'][attack_type]
+            
+            # Load and preprocess
+            train_df = load_and_preprocess(str(train_file), mode='full')
+            test_df = load_and_preprocess(str(test_file), mode='full')
+            
+            print(f"  Train: {len(train_df)} samples, "
+                  f"Attack ratio: {train_df['attack'].mean():.2%}")
+            print(f"  Test:  {len(test_df)} samples, "
+                  f"Attack ratio: {test_df['attack'].mean():.2%}")
+            
+            # Prepare features
+            available_features = [f for f in UCAD_FEATURES if f in train_df.columns]
+            
+            for col in available_features:
+                train_df[col] = train_df[col].fillna(0).replace([np.inf, -np.inf], 0)
+                test_df[col] = test_df[col].fillna(0).replace([np.inf, -np.inf], 0)
+            
+            X_train = train_df[available_features].values
+            X_test = test_df[available_features].values
+            y_train = train_df['attack'].values
+            y_test = test_df['attack'].values
+            
+            # Scale features
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
+            
+            # Calculate attack-specific contamination rate
+            attack_contamination = y_train.mean()
+            print(f"  Calculated contamination rate: {attack_contamination:.2%}")
+            
+            # Initialize UCAD for this attack
+            model_path = self.model_dir / f'ucad_model_{attack_type}.pth'
+            
+            ucad_model = UCADDetector(
+                input_dim=X_train_scaled.shape[1],
+                latent_dim=32,
+                hidden_dims_encoder=[64, 128],
+                hidden_dims_decoder=[128, 64],
+                transformer_layers=2,
+                transformer_heads=4,
+                transformer_dim_feedforward=128,
+                dropout=0.1,
+                contamination_rate=attack_contamination,
+                device=str(self.device)
+            )
+            
+            if model_path.exists():
+                print(f"  Loading existing model from {model_path}")
+                ucad_model.load_model(str(model_path))
+            else:
+                # Train UCAD
+                print(f"  Training UCAD for {attack_type}...")
+                ucad_model.train_ucad(
+                    X_train=X_train_scaled,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    lr_dae=1e-3,
+                    lr_classifier=1e-3,
+                    patience=7,
+                    verbose=True
+                )
+                
+                # Save model
+                ucad_model.save_model(str(model_path))
+                print(f"  Model saved to {model_path}")
+            
+            # Detection on test set
+            print(f"\n  Performing detection for {attack_type}...")
+            y_pred, log_probs = ucad_model.detect(X_test_scaled)
+            
+            # Calculate metrics
+            from sklearn.metrics import (
+                accuracy_score, precision_score, recall_score, 
+                f1_score, roc_auc_score, classification_report
+            )
+            
+            probs_attack = np.exp(log_probs[:, 1])
+            
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(y_test, y_pred, zero_division=0)
+            recall = recall_score(y_test, y_pred, zero_division=0)
+            f1 = f1_score(y_test, y_pred, zero_division=0)
+            
+            try:
+                roc_auc = roc_auc_score(y_test, probs_attack)
+            except:
+                roc_auc = 0.0
+            
+            # Store results
+            per_attack_results[attack_type] = {
+                'accuracy': accuracy,
+                'precision': precision,
+                'recall': recall,
+                'f1': f1,
+                'roc_auc': roc_auc,
+                'y_test': y_test,
+                'y_pred': y_pred,
+                'probs': probs_attack,
+                'model': ucad_model,
+                'scaler': scaler,
+                'features': available_features
+            }
+            
+            print(f"\n  {attack_type.upper()} Results:")
+            print(f"    Accuracy:  {accuracy:.4f}")
+            print(f"    Precision: {precision:.4f}")
+            print(f"    Recall:    {recall:.4f}")
+            print(f"    F1-Score:  {f1:.4f}")
+            print(f"    ROC AUC:   {roc_auc:.4f}")
+        
+        # Create comparison visualization
+        self._visualize_per_attack_comparison(per_attack_results)
+        
+        # Save comparison table
+        self._save_per_attack_results(per_attack_results)
+        
+        return per_attack_results
+    
+    def _visualize_per_attack_comparison(self, results: Dict):
+        """Create comparison visualizations for per-attack detection."""
+        print("\nCreating per-attack comparison visualizations...")
+        
+        # Prepare data
+        attack_types = list(results.keys())
+        metrics = ['accuracy', 'precision', 'recall', 'f1', 'roc_auc']
+        
+        data_for_plot = {metric: [results[at][metric] for at in attack_types] 
+                         for metric in metrics}
+        
+        # Create comparison plot
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig.suptitle('UCAD Per-Attack Detection Performance Comparison', 
+                     fontsize=16, fontweight='bold')
+        
+        # Plot each metric
+        for idx, metric in enumerate(metrics):
+            ax = axes[idx // 3, idx % 3]
+            
+            bars = ax.bar(range(len(attack_types)), data_for_plot[metric], 
+                          color=['skyblue', 'lightcoral', 'lightgreen', 'khaki'])
+            ax.set_xticks(range(len(attack_types)))
+            ax.set_xticklabels(attack_types, rotation=45, ha='right')
+            ax.set_ylabel(metric.replace('_', ' ').title())
+            ax.set_title(f'{metric.replace("_", " ").title()} by Attack Type', 
+                        fontweight='bold')
+            ax.set_ylim(0, 1.0)
+            ax.grid(axis='y', alpha=0.3)
+            
+            # Add value labels on bars
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                       f'{height:.3f}',
+                       ha='center', va='bottom', fontsize=9)
+        
+        # Confusion matrices comparison
+        ax = axes[1, 2]
+        for idx, attack_type in enumerate(attack_types):
+            y_test = results[attack_type]['y_test']
+            y_pred = results[attack_type]['y_pred']
+            
+            from sklearn.metrics import confusion_matrix
+            cm = confusion_matrix(y_test, y_pred)
+            
+            # Normalize
+            cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+            
+            # Plot as text
+            ax.text(0.1, 0.9 - idx*0.2, f"{attack_type}:", 
+                   fontweight='bold', transform=ax.transAxes)
+            ax.text(0.3, 0.9 - idx*0.2, 
+                   f"TN:{cm[0,0]} FP:{cm[0,1]} FN:{cm[1,0]} TP:{cm[1,1]}", 
+                   fontsize=9, transform=ax.transAxes)
+        
+        ax.set_title('Confusion Matrices', fontweight='bold')
+        ax.axis('off')
+        
+        plt.tight_layout()
+        fig_path = self.fig_dir / 'per_attack_comparison.png'
+        plt.savefig(fig_path, bbox_inches='tight')
+        print(f"Saved per-attack comparison to {fig_path}")
+        if self.logger:
+            self.logger.log_figure(fig, "task5_ucad/per_attack_comparison")
+        plt.close()
+        
+        # ROC curves comparison
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        from sklearn.metrics import roc_curve, auc
+        colors = ['blue', 'red', 'green', 'orange']
+        
+        for idx, attack_type in enumerate(attack_types):
+            y_test = results[attack_type]['y_test']
+            probs = results[attack_type]['probs']
+            
+            if len(np.unique(y_test)) > 1:
+                fpr, tpr, _ = roc_curve(y_test, probs)
+                roc_auc = auc(fpr, tpr)
+                
+                ax.plot(fpr, tpr, color=colors[idx], lw=2,
+                       label=f'{attack_type} (AUC = {roc_auc:.3f})')
+        
+        ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', 
+               label='Random Classifier')
+        ax.set_xlim([0.0, 1.0])
+        ax.set_ylim([0.0, 1.05])
+        ax.set_xlabel('False Positive Rate', fontweight='bold')
+        ax.set_ylabel('True Positive Rate', fontweight='bold')
+        ax.set_title('ROC Curves - Per-Attack Type Comparison', 
+                    fontweight='bold', fontsize=14)
+        ax.legend(loc="lower right")
+        ax.grid(alpha=0.3)
+        
+        fig_path = self.fig_dir / 'per_attack_roc_comparison.png'
+        plt.savefig(fig_path, bbox_inches='tight')
+        print(f"Saved ROC comparison to {fig_path}")
+        if self.logger:
+            self.logger.log_figure(fig, "task5_ucad/per_attack_roc")
+        plt.close()
+    
+    def _save_per_attack_results(self, results: Dict):
+        """Save per-attack results to CSV."""
+        print("\nSaving per-attack results table...")
+        
+        rows = []
+        for attack_type, metrics in results.items():
+            rows.append({
+                'Attack Type': attack_type.upper(),
+                'Accuracy': f"{metrics['accuracy']:.4f}",
+                'Precision': f"{metrics['precision']:.4f}",
+                'Recall': f"{metrics['recall']:.4f}",
+                'F1-Score': f"{metrics['f1']:.4f}",
+                'ROC AUC': f"{metrics['roc_auc']:.4f}"
+            })
+        
+        df_results = pd.DataFrame(rows)
+        
+        # Calculate average
+        avg_row = {
+            'Attack Type': 'AVERAGE',
+            'Accuracy': f"{df_results['Accuracy'].astype(float).mean():.4f}",
+            'Precision': f"{df_results['Precision'].astype(float).mean():.4f}",
+            'Recall': f"{df_results['Recall'].astype(float).mean():.4f}",
+            'F1-Score': f"{df_results['F1-Score'].astype(float).mean():.4f}",
+            'ROC AUC': f"{df_results['ROC AUC'].astype(float).mean():.4f}"
+        }
+        df_results = pd.concat([df_results, pd.DataFrame([avg_row])], ignore_index=True)
+        
+        # Save
+        table_path = self.table_dir / 'per_attack_detection_results.csv'
+        df_results.to_csv(table_path, index=False)
+        print(f"Saved results table to {table_path}")
+        
+        # Print to console
+        print("\n" + "="*70)
+        print("PER-ATTACK DETECTION RESULTS SUMMARY")
+        print("="*70)
+        print(df_results.to_string(index=False))
+        print("="*70)
+        
+        if self.logger:
+            self.logger.log_dataframe(df_results, "task5_ucad/per_attack_results")
+
     def _plot_training_history(self):
         """Plot UCAD training curves."""
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -545,9 +840,20 @@ class AdvancedAnalyzerUCAD:
 # RUNNER FUNCTION
 # ============================================================
 
-def run_task5_ucad(config: Dict[str, Any], logger=None) -> Dict:
+def run_task5_ucad(config: Dict[str, Any], logger=None, mode: str = 'both') -> Dict:
     """
     Execute Task 5: Advanced Analyses with UCAD.
+    
+    Args:
+        config: Configuration dictionary
+        logger: Optional logger
+        mode: 'combined', 'per_attack', or 'both'
+            - 'combined': Train on combined dataset only
+            - 'per_attack': Train separate model for each attack type
+            - 'both': Run both analyses (default)
+    
+    Returns:
+        Dictionary with results
     """
     results = {}
     
@@ -556,21 +862,54 @@ def run_task5_ucad(config: Dict[str, Any], logger=None) -> Dict:
     # Load and prepare data
     analyzer.load_and_prepare_data()
     
-    # 1. Run UCAD detection
-    analyzer.ucad_detection(
-        epochs=50,
-        batch_size=128,
-        contamination_rate=0.076
-    )
+    # Run based on mode
+    if mode in ['combined', 'both']:
+        print("\n" + "="*70)
+        print("RUNNING COMBINED DETECTION (All Attacks Together)")
+        print("="*70)
+        
+        # 1. Run UCAD detection on combined dataset
+        analyzer.ucad_detection(
+            epochs=50,
+            batch_size=128,
+            contamination_rate=0.076
+        )
+        
+        # 2. Run graph-based analysis
+        analyzer.graph_based_analysis()
+        
+        # 3. Visualize latent space
+        tsne_df = analyzer.visualize_latent_space()
+        
+        # # 4. Feature importance analysis
+        # importance_df = analyzer.analyze_feature_importance()
+        
+        results['combined'] = {
+            'status': 'completed',
+            'tsne_results': tsne_df,
+            # 'feature_importance': importance_df
+        }
     
-    # 2. Run graph-based analysis
-    analyzer.graph_based_analysis()
+    if mode in ['per_attack', 'both']:
+        print("\n" + "="*70)
+        print("RUNNING PER-ATTACK DETECTION (Separate Models)")
+        print("="*70)
+        
+        # Run per-attack detection
+        per_attack_results = analyzer.ucad_detection_per_attack(
+            epochs=50,
+            batch_size=128,
+            contamination_rate=0.076  # Will be overridden per attack
+        )
+        
+        results['per_attack'] = per_attack_results
     
-    # 3. Visualize latent space
-    tsne_df = analyzer.visualize_latent_space()
-    
-    results['status'] = 'completed'
-    results['tsne_results'] = tsne_df
+    if mode == 'both':
+        # Create combined vs per-attack comparison
+        print("\n" + "="*70)
+        print("Creating Combined vs Per-Attack Comparison...")
+        print("="*70)
+        analyzer._create_combined_vs_per_attack_comparison()
     
     print(f"\n{'='*70}")
     print("✓ Task 5 (Advanced Analyses with UCAD) completed successfully!")
