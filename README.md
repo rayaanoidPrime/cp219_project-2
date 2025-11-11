@@ -1,184 +1,410 @@
-# Quick Start Guide - CP219 Project 2 with UV
+# CP219 Project 2 - Goose IDS Detection
 
-## Step 7: Set Up W&B (Optional but Recommended)
+## Overview
+
+This repository contains the implementation of CP219 Project 2 for intrusion detection system analysis. The code generates all figures and tables presented in the accompanying report through five main tasks:
+
+- **Task 1**: Exploratory Data Analysis (EDA)
+- **Task 2**: Feature Characterization
+- **Task 3**: Binary Detection Models
+- **Task 4**: Multi-class Detection Models
+- **Task 5**: Advanced analysis
+
+All experiments are tracked using Weights & Biases (W&B) and outputs are saved locally in the `outputs/` directory.
+
+---
+
+## Prerequisites
+
+- **Python**: Version specified in `pyproject.toml`
+- **UV**: Modern Python package manager
+- **Data**: Raw data files must be placed in `data/raw/` directory
+- **W&B Account**: For experiment tracking (optional but recommended)
+
+---
+
+## Setup Instructions
+
+### 1. Install UV Package Manager
+
+If you don't have UV installed:
+
+```bash
+# macOS/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Verify installation
+uv --version
+```
+
+### 2. Clone and Setup Environment
+
+```bash
+# Navigate to project directory
+cd cp219_project2
+
+# Create virtual environment with UV
+uv venv
+
+# Activate virtual environment
+# macOS/Linux:
+source .venv/bin/activate
+
+# Windows:
+.venv\Scripts\activate
+
+# Install all dependencies from pyproject.toml
+uv pip install -e .
+# Install all dependencies from pyproject.toml
+uv pip install -e ".[deep]"
+```
+
+### 3. Setup Weights & Biases (Optional)
 
 ```bash
 # Login to W&B
 wandb login
 
 # Enter your API key from: https://wandb.ai/authorize
-
-# Update config.yaml with your team name
 ```
 
-## Step 8: Run Tasks
+### 4. Verify Data Files
 
-### Run Task 1 (EDA)
+Ensure your data files are placed in the `data/raw/` directory. The exact filenames should match the configuration in `config/config.yaml`.
 
 ```bash
-# Copy task1_eda.py to src/tasks/
-# Then run:
-python -m src.tasks.task1_eda
+# Check data directory
+ls data/raw/
 ```
 
-Or create a simple runner in `experiments/`:
+---
+
+## Reproducing Results
+
+All tasks can be reproduced by running the corresponding scripts in the `experiments/` directory. Each script accepts command-line arguments for customization.
+
+### General Command Structure
 
 ```bash
-# Create experiments/run_task1.py
-cat > experiments/run_task1.py << 'EOF'
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import yaml
-from src.tasks.task1_eda import run_task1
-
-if __name__ == '__main__':
-    with open('config/config.yaml', 'r') as f:
-        config = yaml.safe_load(f)
-
-    results = run_task1(config, logger=None)
-    print("\nTask 1 completed!")
-EOF
-
-# Run it
-python experiments/run_task1.py
+python experiments/run_task<N>.py --mode="<mode>" --wandb-name="<experiment_name>"
 ```
 
-### Run Task 2 (Feature Characterization)
+**Arguments:**
+- `--mode`: Execution mode (e.g., "full", "core", "new", "core_new")
+- `--wandb-name`: Name for the W&B experiment run
+
+---
+
+### Task 1: Exploratory Data Analysis
+
+Generates distribution plots, correlation matrices, and summary statistics.
 
 ```bash
-# Create experiments/run_task2.py
-cat > experiments/run_task2.py << 'EOF'
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import yaml
-from src.tasks.task2_characterization import run_task2
-
-if __name__ == '__main__':
-    with open('config/config.yaml', 'r') as f:
-        config = yaml.safe_load(f)
-
-    results = run_task2(config, logger=None)
-    print("\nTask 2 completed!")
-EOF
-
-# Run it
-python experiments/run_task2.py
+python experiments/run_task1.py --mode="full" --wandb-name="task1_eda"
 ```
 
-### Run with W&B
+**Outputs:**
+- Figures: `outputs/figures/task1/`
+- Tables: `outputs/tables/task1/`
 
-```python
-# experiments/run_task1_wandb.py
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+**Generated Artifacts:**
+- Data distribution visualizations
+- Feature correlation heatmaps
+- Class balance analysis
+- Summary statistics tables
 
-import yaml
-from src.tasks.task1_eda import run_task1
-from src.utils.wandb_utils import WandbLogger
+---
 
-if __name__ == '__main__':
-    with open('config/config.yaml', 'r') as f:
-        config = yaml.safe_load(f)
+### Task 2: Feature Characterization
 
-    # Initialize W&B
-    logger = WandbLogger(
-        project_name=config['project']['name'],
-        entity=config['project'].get('entity'),
-        config=config,
-        job_type='task1_eda',
-        tags=['task1', 'eda']
-    )
-
-    # Run task
-    results = run_task1(config, logger)
-
-    # Finish
-    logger.finish()
-    print("\nTask 1 completed with W&B logging!")
-```
-
-## Step 9: Check Outputs
+Performs feature importance analysis, dimensionality reduction, and feature engineering.
 
 ```bash
-# View generated figures
-ls outputs/figures/task1/
-ls outputs/figures/task2/
+python experiments/run_task2.py --mode="full" --wandb-name="task2_characterization"
+```
 
-# View generated tables
-ls outputs/tables/task1/
-ls outputs/tables/task2/
+**Outputs:**
+- Figures: `outputs/figures/task2/`
+- Tables: `outputs/tables/task2/`
 
-# Open figures (macOS)
+**Generated Artifacts:**
+- Feature importance rankings
+- PCA/t-SNE visualizations
+- Feature distribution comparisons
+- Statistical test results
+
+---
+
+### Task 3: Binary Detection Models
+
+Trains and evaluates binary classification models (normal vs. attack).
+
+```bash
+python experiments/run_task3.py --mode="full" --wandb-name="task3_binary"
+```
+
+**Outputs:**
+- Figures: `outputs/figures/task3/`
+- Tables: `outputs/tables/task3/`
+- Models: `outputs/models/task3/`
+
+**Generated Artifacts:**
+- Precision-Recall curves
+- Confusion matrices
+- Model performance comparison tables
+- Trained model checkpoints
+
+---
+
+### Task 4: Multi-class Detection Models
+
+Trains and evaluates multi-class classification models (attack type classification).
+
+```bash
+python experiments/run_task4.py --mode="full" --wandb-name="task4_multiclass"
+```
+
+**Outputs:**
+- Figures: `outputs/figures/task4/`
+- Tables: `outputs/tables/task4/`
+- Models: `outputs/models/task4/`
+
+**Generated Artifacts:**
+- Multi-class confusion matrices
+- Per-class performance metrics
+- Model comparison tables
+- Attack type classification results
+- Trained model checkpoints
+
+---
+
+### Task 5: Unsupervised Change-point Anomaly Detection (UCAD)
+
+Performs unsupervised anomaly detection using change-point detection methods.
+
+```bash
+python experiments/run_task5_ucad.py --mode="full" --wandb-name="task5_ucad"
+```
+
+**Outputs:**
+- Figures: `outputs/figures/task5/`
+- Tables: `outputs/tables/task5/`
+
+**Generated Artifacts:**
+- Change-point detection visualizations
+- Anomaly score distributions
+- Temporal analysis plots
+- Unsupervised detection performance metrics
+
+---
+
+## Running All Tasks
+
+To reproduce all results sequentially:
+
+```bash
+# Task 1: EDA
+python experiments/run_task1.py --mode="full" --wandb-name="task1_eda"
+
+# Task 2: Feature Characterization
+python experiments/run_task2.py --mode="full" --wandb-name="task2_characterization"
+
+# Task 3: Binary Detection
+python experiments/run_task3.py --mode="full" --wandb-name="task3_binary"
+
+# Task 4: Multi-class Detection
+python experiments/run_task4.py --mode="full" --wandb-name="task4_multiclass"
+
+# Task 5: UCAD
+python experiments/run_task5_ucad.py --mode="full" --wandb-name="task5_ucad"
+```
+
+---
+
+## Output Structure
+
+```
+outputs/
+├── figures/
+│   ├── task1/          # EDA visualizations
+│   ├── task2/          # Feature characterization plots
+│   ├── task3/          # Binary detection results
+│   ├── task4/          # Multi-class detection results
+│   └── task5/          # UCAD visualizations
+├── tables/
+│   ├── task1/          # Summary statistics
+│   ├── task2/          # Feature analysis tables
+│   ├── task3/          # Binary model performance
+│   ├── task4/          # Multi-class model performance
+│   └── task5/          # UCAD results
+└── models/
+    ├── task3/          # Trained binary models
+    └── task4/          # Trained multi-class models
+```
+
+---
+
+## Viewing Results
+
+### Local Outputs
+
+```bash
+# View figures (macOS)
 open outputs/figures/task1/*.png
 
-# Open figures (Linux)
+# View figures (Linux)
 xdg-open outputs/figures/task1/*.png
 
-# Open figures (Windows)
+# View figures (Windows)
 start outputs/figures/task1/*.png
+
+# List all generated outputs
+find outputs/ -type f
 ```
 
-## Step 10: Team Collaboration
+### Weights & Biases Dashboard
 
-### Each Team Member:
+View all logged experiments and metrics:
 
-1. **Clone the repository**
+1. Navigate to: https://wandb.ai/HPR-cp219/cp219-goose-ids
+2. Browse runs by task name
+3. Compare metrics across different runs
+4. View logged figures and tables
 
-   ```bash
-   git clone <repository-url>
-   cd cp219_project2
-   ```
+---
 
-2. **Set up UV environment**
+## Configuration
 
-   ```bash
-   uv venv
-   source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-   uv pip install -e ".[dev]"
-   ```
+All experiment parameters are configured in `config/config.yaml`. The configuration includes:
 
-3. **Login to W&B**
+- Data paths and preprocessing parameters
+- Model hyperparameters
+- Training settings
+- Output directories
+- W&B project settings
 
-   ```bash
-   wandb login
-   ```
+**Note**: No modifications to `config/config.yaml` are required for standard reproduction. The default settings will reproduce all results from the report.
 
-4. **Run experiments with your name tag**
+---
 
-   ```python
-   logger = WandbLogger(
-       project_name="cp219-goose-ids",
-       entity="your-team-name",
-       tags=['task1', 'alice']  # Add your name
-   )
-   ```
 
-5. **View results in W&B dashboard**
-   - Go to https://wandb.ai/your-team-name/cp219-goose-ids
-   - Compare runs across team members
-   - Share insights
+### Issue: UV command not found
 
-## Common Commands
+```bash
+# Add UV to PATH (macOS/Linux)
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# Reload shell configuration
+source ~/.bashrc  # or source ~/.zshrc
+
+# Verify installation
+uv --version
+```
+
+### Issue: Data files not found
+
+```bash
+# Check data directory exists
+ls data/raw/
+
+# Verify config.yaml points to correct paths
+cat config/config.yaml | grep "data"
+
+# Ensure data files match expected names in config
+```
+
+### Issue: W&B authentication
+
+```bash
+# Re-authenticate
+wandb login --relogin
+
+# Check status
+wandb status
+
+# Run with debug mode
+WANDB_DEBUG=true python experiments/run_task1.py --mode="full" --wandb-name="debug"
+
+# Disable W&B (if needed)
+export WANDB_MODE=disabled
+```
+
+### Issue: Out of memory
+
+```bash
+# Reduce batch size or use quick mode
+python experiments/run_task3.py --mode="quick" --wandb-name="task3_quick"
+
+# Monitor memory usage
+# Adjust parameters in config/config.yaml if needed
+```
+
+### Issue: Missing dependencies
+
+```bash
+# Update all dependencies
+uv pip install --upgrade -e ".[dev]"
+
+# Check installed packages
+uv pip list
+
+# Verify specific package
+uv pip show <package-name>
+```
+
+---
+
+## Project Structure
+
+```
+cp219_project2/
+├── config/
+│   └── config.yaml              # Configuration file
+├── data/
+│   └── raw/                     # Raw data files (not in repo)
+├── experiments/
+│   ├── run_task1.py            # Task 1 runner
+│   ├── run_task2.py            # Task 2 runner
+│   ├── run_task3.py            # Task 3 runner
+│   ├── run_task4.py            # Task 4 runner
+│   └── run_task5_ucad.py       # Task 5 runner
+├── src/
+│   ├── tasks/                   # Task implementations
+│   │   ├── task1_eda.py
+│   │   ├── task2_characterization.py
+│   │   ├── task3_binary.py
+│   │   ├── task4_multiclass.py
+│   │   └── task5_ucad.py
+│   ├── models/                  # Model implementations
+│   ├── utils/                   # Utility functions
+│   └── preprocessing/           # Data preprocessing
+├── outputs/                     # Generated outputs
+│   ├── figures/
+│   ├── tables/
+│   └── models/
+├── tests/                       # Unit tests
+├── pyproject.toml              # Project dependencies
+└── README.md                    # This file
+```
+
+---
+
+## Additional Commands
 
 ```bash
 # Install new package
-uv pip install package-name
+uv pip install <package-name>
 
-# Update dependencies
-uv pip install --upgrade package-name
+# Update specific package
+uv pip install --upgrade <package-name>
 
 # List installed packages
 uv pip list
 
-# Freeze dependencies (for requirements.txt)
-uv pip freeze > requirements.txt
-
-# Run tests
+# Run tests (if available)
 pytest tests/
 
 # Format code
@@ -186,74 +412,37 @@ black src/
 
 # Lint code
 flake8 src/
-
-# Start Jupyter notebook
-jupyter notebook notebooks/
 ```
-
-## Troubleshooting
-
-### Issue: Module not found
-
-```bash
-# Make sure you're in the project root and activated venv
-pwd  # Should show project directory
-which python  # Should show .venv/bin/python
-
-# Add project to PYTHONPATH
-export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-```
-
-### Issue: UV command not found
-
-```bash
-# Add UV to PATH (add to ~/.bashrc or ~/.zshrc)
-export PATH="$HOME/.cargo/bin:$PATH"
-
-# Reload shell
-source ~/.bashrc  # or source ~/.zshrc
-```
-
-### Issue: Data files not found
-
-```bash
-# Check data directory
-ls data/raw/
-
-# Ensure files are named correctly (case-sensitive!)
-# Should match names in config.yaml
-```
-
-### Issue: W&B not logging
-
-```bash
-# Re-login
-wandb login --relogin
-
-# Check W&B status
-wandb status
-
-# Run with debug mode
-WANDB_DEBUG=true python experiments/run_task1.py
-```
-
-## Next Steps
-
-1. ✅ Complete Task 1 (EDA)
-2. ✅ Complete Task 2 (Feature Characterization)
-3. ⬜ Implement Task 3 (Binary Detection)
-4. ⬜ Implement Task 4 (Multi-class Detection)
-5. ⬜ Optional: Task 5 (Advanced Analyses)
-6. ⬜ Write report
-7. ⬜ Prepare submission
-
-## Resources
-
-- **UV Documentation**: https://docs.astral.sh/uv/
-- **W&B Documentation**: https://docs.wandb.ai/
-- **Project Specification**: CP219_Project2_2025.pdf
-- **Team Dashboard**: https://wandb.ai/HPR-cp219 /cp219-goose-ids
 
 ---
 
-**Happy Coding! 🚀**
+## Notes on Reproducibility
+
+- **Random Seeds**: All random seeds are set in `config/config.yaml` for reproducibility
+- **Deterministic Operations**: Neural network operations use deterministic algorithms where possible
+- **Environment**: Results may vary slightly across different hardware/OS due to numerical precision
+- **Data**: Ensure data files in `data/raw/` match the expected format and version
+- **Dependencies**: All versions are pinned in `pyproject.toml` for consistent results
+
+---
+
+## Support
+
+For issues or questions:
+1. Check the troubleshooting section above
+2. Review W&B logs for detailed error messages
+3. Verify configuration in `config/config.yaml`
+4. Check that all dependencies are correctly installed
+
+---
+
+## Project Information
+
+- **Course**: CP219
+- **Project**: Project 2 - Goose IDS Detection
+- **W&B Project**: HPR-cp219/cp219-goose-ids
+- **Repository**: [Add your repository URL]
+
+---
+
+**Last Updated**: November 2025
