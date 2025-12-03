@@ -27,6 +27,12 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     confusion_matrix, roc_auc_score, roc_curve
 )
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+
 from src.preprocessing import (
     preprocess_dataframe,
     load_combined_datasets,
@@ -37,6 +43,146 @@ from src.preprocessing import (
     ALLOWED_FIELDS
 )
 
+class AutoencoderModel(nn.Module):
+    """PyTorch Autoencoder for dimensionality reduction."""
+    
+    def __init__(self, input_dim, encoder_layers, latent_dim, decoder_layers, 
+                 activation='relu', dropout=0.2):
+        super(AutoencoderModel, self).__init__()
+        
+        # Activation function
+        if activation == 'relu':
+            self.activation = nn.ReLU()
+        elif activation == 'tanh':
+            self.activation = nn.Tanh()
+        elif activation == 'leaky_relu':
+            self.activation = nn.LeakyReLU(0.2)
+        else:
+            self.activation = nn.ReLU()
+        
+        # Build encoder
+        encoder_layers_list = []
+        prev_dim = input_dim
+        for hidden_dim in encoder_layers:
+            encoder_layers_list.append(nn.Linear(prev_dim, hidden_dim))
+            encoder_layers_list.append(self.activation)
+            encoder_layers_list.append(nn.Dropout(dropout))
+            prev_dim = hidden_dim
+        
+        # Latent layer
+        encoder_layers_list.append(nn.Linear(prev_dim, latent_dim))
+        self.encoder = nn.Sequential(*encoder_layers_list)
+        
+        # Build decoder
+        decoder_layers_list = []
+        prev_dim = latent_dim
+        for hidden_dim in decoder_layers:
+            decoder_layers_list.append(nn.Linear(prev_dim, hidden_dim))
+            decoder_layers_list.append(self.activation)
+            decoder_layers_list.append(nn.Dropout(dropout))
+            prev_dim = hidden_dim
+        
+        # Output layer
+        decoder_layers_list.append(nn.Linear(prev_dim, input_dim))
+        self.decoder = nn.Sequential(*decoder_layers_list)
+    
+    def forward(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return decoded
+    
+    def encode(self, x):
+        return self.encoder(x)
+
+
+
+class AutoencoderDetector:
+    """Autoencoder-based anomaly detector."""
+    
+    def __init__(self, input_dim: int, 
+                 encoding_dim: int = None,  
+                 hidden_layers: List[int] = None, 
+                 activation: str = 'leaky_relu',
+                 dropout: float = 0.2,
+                 threshold_percentile: float = 95.0, 
+                 device: str = None):
+        
+        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.input_dim = input_dim
+        self.threshold_percentile = threshold_percentile
+        self.threshold_ = None
+        
+        latent_dim = encoding_dim if encoding_dim is not None else max(4, input_dim // 4)
+  
+        if hidden_layers is None:
+            # Create one layer halfway between input and latent
+            mid_dim = (input_dim + latent_dim) // 2
+            encoder_layers = [mid_dim]
+        else:
+            encoder_layers = hidden_layers
+            
+        decoder_layers = encoder_layers[::-1]
+        
+        self.model = AutoencoderModel(
+            input_dim=input_dim,
+            encoder_layers=encoder_layers,
+            latent_dim=latent_dim,
+            decoder_layers=decoder_layers,
+            activation=activation,
+            dropout=dropout
+        ).to(self.device)
+        
+        print(f"    Initialized Autoencoder: In({input_dim}) -> {encoder_layers} -> Latent({latent_dim}) -> {decoder_layers} -> Out({input_dim})")
+        
+    def fit(self, X, epochs: int = 50, batch_size: int = 256, lr: float = 0.001):
+        """Train the autoencoder on normal data."""
+        X_tensor = torch.FloatTensor(X).to(self.device)
+        dataset = TensorDataset(X_tensor, X_tensor)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        
+        self.model.train()
+        for epoch in range(epochs):
+            total_loss = 0
+            for batch_X, _ in dataloader:
+                optimizer.zero_grad()
+                reconstructed = self.model(batch_X)
+                loss = criterion(reconstructed, batch_X)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+            
+            if (epoch + 1) % 10 == 0:
+                avg_loss = total_loss / len(dataloader)
+                print(f"    Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.6f}")
+        
+        # Calculate threshold based on reconstruction errors on training data
+        self.model.eval()
+        with torch.no_grad():
+            X_tensor = torch.FloatTensor(X).to(self.device)
+            reconstructed = self.model(X_tensor)
+            mse = torch.mean((X_tensor - reconstructed) ** 2, dim=1)
+            reconstruction_errors = mse.cpu().numpy()
+        
+        self.threshold_ = np.percentile(reconstruction_errors, self.threshold_percentile)
+        print(f"    Threshold set at {self.threshold_percentile}th percentile: {self.threshold_:.6f}")
+        
+        return self
+    
+    def predict(self, X):
+        """Predict anomalies based on reconstruction error."""
+        self.model.eval()
+        with torch.no_grad():
+            X_tensor = torch.FloatTensor(X).to(self.device)
+            reconstructed = self.model(X_tensor)
+            mse = torch.mean((X_tensor - reconstructed) ** 2, dim=1)
+            reconstruction_errors = mse.cpu().numpy()
+        
+        # Predict: 1 if error > threshold (anomaly), 0 otherwise (normal)
+        predictions = (reconstruction_errors > self.threshold_).astype(int)
+        return predictions
 
 
 class BinaryDetector:
@@ -50,6 +196,7 @@ class BinaryDetector:
         self.inference_time_total = 0.0       # total inference time (seconds) for last predict call
         self.inference_time_per_sample = 0.0
         self.train_labels_ = None  # Store training labels for DBSCAN
+        self.is_autoencoder = isinstance(model, AutoencoderDetector)
         
     def fit(self, X):
         """Train the model."""
@@ -58,6 +205,12 @@ class BinaryDetector:
         if isinstance(self.model, DBSCAN):
             # dont fit dbscan during training
             self.train_labels_ = None
+        elif self.is_autoencoder:
+            # Train autoencoder with custom parameters
+            epochs = self.config.get('epochs', 50)
+            batch_size = self.config.get('batch_size', 256)
+            lr = self.config.get('lr', 0.001)
+            self.model.fit(X, epochs=epochs, batch_size=batch_size, lr=lr)
         else:
             self.model.fit(X)
             
@@ -83,7 +236,9 @@ class BinaryDetector:
         self.inference_time_per_sample = (total / n) if n > 0 else 0.0
         
         # Convert raw_preds to binary 0=normal, 1=attack
-        if isinstance(self.model, (IsolationForest, OneClassSVM)):
+        if self.is_autoencoder:
+            preds = raw_preds  # Already in 0/1 format
+        elif isinstance(self.model, (IsolationForest, OneClassSVM)):
             preds = np.where(raw_preds == -1, 1, 0)
         elif isinstance(self.model, DBSCAN):
             # DBSCAN labels: -1 = noise/outlier -> treat as attack
@@ -108,9 +263,15 @@ class BinaryDetector:
         size, serialize to a TemporaryFile via joblib.dump and measure that file instead.
         """
         try:
-            serialized = pickle.dumps(self.model, protocol=pickle.HIGHEST_PROTOCOL)
-            mem_bytes = len(serialized)
-            return mem_bytes / (1024.0 * 1024.0)
+            if self.is_autoencoder:
+                # For PyTorch models, estimate from state_dict
+                param_size = sum(p.nelement() * p.element_size() for p in self.model.model.parameters())
+                buffer_size = sum(b.nelement() * b.element_size() for b in self.model.model.buffers())
+                return (param_size + buffer_size) / (1024.0 * 1024.0)
+            else:
+                serialized = pickle.dumps(self.model, protocol=pickle.HIGHEST_PROTOCOL)
+                mem_bytes = len(serialized)
+                return mem_bytes / (1024.0 * 1024.0)
         except Exception:
             # fallback: try joblib to a temporary file (if pickle fails)
             import tempfile, joblib, os
@@ -125,7 +286,6 @@ class BinaryDetector:
                     os.remove(tmp_path)
                 except Exception:
                     pass
-
 
 class Task3BinaryDetection:
     """Task 3: Binary Intrusion Detection (Per-Attack Training)."""
@@ -367,50 +527,62 @@ class Task3BinaryDetection:
         
         return X_train_scaled, y_train, X_test_scaled, y_test, feature_names, scaler
     
-    def create_models(self, contamination: float = 0.1):
+    def create_models(self, contamination: float = 0.1, n_features: int = None):
         """Create all models to compare."""
         models = {
-            'Isolation Forest': BinaryDetector(
-                'Isolation Forest',
-                IsolationForest(
-                    n_estimators=100,
-                    contamination=contamination,
-                    random_state=42,
-                    n_jobs=-1
-                )
+            'Autoencoder': BinaryDetector(
+                'Autoencoder',
+                AutoencoderDetector(
+                    input_dim=n_features,
+                    encoding_dim=8,           # The tight bottleneck
+                    hidden_layers=[32, 16],   # The steps down: Input -> 32 -> 16 -> 8
+                    activation='leaky_relu',
+                    dropout=0.2,
+                    threshold_percentile=95.0
+                ),
+                config={'epochs': 50, 'batch_size': 256, 'lr': 0.001}
             ),
-            'One-Class SVM': BinaryDetector(
-                'One-Class SVM',
-                OneClassSVM(
-                    kernel='rbf',
-                    gamma='auto',
-                    nu=contamination
-                )
-            ),
-            'K-Means': BinaryDetector(
-                'K-Means',
-                KMeans(
-                    n_clusters=2,
-                    random_state=42,
-                    n_init=10
-                )
-            ),
-            'GMM': BinaryDetector(
-                'GMM',
-                GaussianMixture(
-                    n_components=2,
-                    random_state=42,
-                    covariance_type='full'
-                )
-            ),
-            'DBSCAN': BinaryDetector(
-                'DBSCAN',
-                DBSCAN(
-                    eps=3.0,
-                    min_samples=50,
-                    n_jobs=-1
-                )
-            )
+            # 'Isolation Forest': BinaryDetector(
+            #     'Isolation Forest',
+            #     IsolationForest(
+            #         n_estimators=100,
+            #         contamination=contamination,
+            #         random_state=42,
+            #         n_jobs=-1
+            #     )
+            # ),
+            # 'One-Class SVM': BinaryDetector(
+            #     'One-Class SVM',
+            #     OneClassSVM(
+            #         kernel='rbf',
+            #         gamma='auto',
+            #         nu=contamination
+            #     )
+            # ),
+            # 'K-Means': BinaryDetector(
+            #     'K-Means',
+            #     KMeans(
+            #         n_clusters=2,
+            #         random_state=42,
+            #         n_init=10
+            #     )
+            # ),
+            # 'GMM': BinaryDetector(
+            #     'GMM',
+            #     GaussianMixture(
+            #         n_components=2,
+            #         random_state=42,
+            #         covariance_type='full'
+            #     )
+            # ),
+            # 'DBSCAN': BinaryDetector(
+            #     'DBSCAN',
+            #     DBSCAN(
+            #         eps=3.0,
+            #         min_samples=50,
+            #         n_jobs=-1
+            #     )
+            # )
         }
         
         return models
@@ -530,7 +702,7 @@ class Task3BinaryDetection:
         contamination = max(0.01, min(0.5, y_train.mean()))
         print(f"Using contamination={contamination:.3f} (attack ratio: {y_train.mean():.3f})")
         
-        models = self.create_models(contamination=contamination)
+        models = self.create_models(contamination=contamination, n_features=X_train.shape[1])
         results = []
         all_predictions = {}
         
@@ -847,7 +1019,7 @@ class Task3BinaryDetection:
         contamination = max(0.01, min(0.5, y_train.mean()))
         print(f"Using contamination={contamination:.3f} (attack ratio: {y_train.mean():.3f})")
         
-        models = self.create_models(contamination=contamination)
+        models = self.create_models(contamination=contamination, n_features=X_train.shape[1])
         results = []
         all_predictions = {}
         
@@ -908,9 +1080,9 @@ class Task3BinaryDetection:
                     'Precision': balanced_metrics['precision'],
                     'Recall': balanced_metrics['recall'],
                     'F1-Score': balanced_metrics['f1_score'],
-                    'Train Time (s)': metrics_imbalanced['train_time'],
-                    'Inference Time (ms)': metrics_imbalanced['inference_time_ms'],
-                    'Memory (MB)': metrics_imbalanced['memory_mb'],
+                    # 'Train Time (s)': metrics_imbalanced['train_time'],
+                    # 'Inference Time (ms)': metrics_imbalanced['inference_time_ms'],
+                    # 'Memory (MB)': metrics_imbalanced['memory_mb'],
                     # Store all imbalanced metrics for reference
                     'Imbalanced_Accuracy': metrics_imbalanced['accuracy'],
                     'Imbalanced_Precision': metrics_imbalanced['precision'],
@@ -1063,43 +1235,43 @@ def run_task3(config: Dict[str, Any], logger=None) -> Dict:
             print(f"\n✓ Completed {attack_type} attack analysis")
         
         # ===== COMBINED DATASET TRAINING =====
-        # print(f"\n{'*'*70}")
-        # print(f"* PROCESSING COMBINED DATASET")
-        # print(f"{'*'*70}")
+        print(f"\n{'*'*70}")
+        print(f"* PROCESSING COMBINED DATASET")
+        print(f"{'*'*70}")
         
-        # # Load combined data
-        # print("\nLoading combined dataset...")
-        # train_combined, test_combined = load_combined_datasets(
-        #     Path(config['data']['raw_dir']),
-        #     config['data']['train_files'],
-        #     config['data']['test_files'],
-        #     mode=mode
-        # )
+        # Load combined data
+        print("\nLoading combined dataset...")
+        train_combined, test_combined = load_combined_datasets(
+            Path(config['data']['raw_dir']),
+            config['data']['train_files'],
+            config['data']['test_files'],
+            mode=mode
+        )
         
-        # # Preprocess combined data
-        # X_train_comb, y_train_comb, X_test_comb, y_test_comb, features_comb, scaler_comb = \
-        #     task3.preprocess_attack_data(train_combined, test_combined, 'combined')
+        # Preprocess combined data
+        X_train_comb, y_train_comb, X_test_comb, y_test_comb, features_comb, scaler_comb = \
+            task3.preprocess_attack_data(train_combined, test_combined, 'combined')
         
-        # # Train and evaluate on combined dataset
-        # results_df_comb, all_predictions_comb = task3.train_and_evaluate_combined(
-        #     X_train_comb, y_train_comb, X_test_comb, y_test_comb,
-        #     test_combined,  # Pass the full test DataFrame
-        #     scaler_comb,    # Pass the scaler
-        #     features_comb   # Pass the feature names
-        # )
+        # Train and evaluate on combined dataset
+        results_df_comb, all_predictions_comb = task3.train_and_evaluate_combined(
+            X_train_comb, y_train_comb, X_test_comb, y_test_comb,
+            test_combined,  # Pass the full test DataFrame
+            scaler_comb,    # Pass the scaler
+            features_comb   # Pass the feature names
+        )
         
-        # # Visualize combined results
-        # task3.visualize_combined_results(
-        #     results_df_comb, X_test_comb, y_test_comb, all_predictions_comb
-        # )
+        # Visualize combined results
+        task3.visualize_combined_results(
+            results_df_comb, X_test_comb, y_test_comb, all_predictions_comb
+        )
         
-        # # Generate combined dataset summary
-        # results_df_comb = task3.generate_combined_summary(results_df_comb)
+        # Generate combined dataset summary
+        results_df_comb = task3.generate_combined_summary(results_df_comb)
         
-        # # Add to results
-        # all_attack_results['combined'] = results_df_comb
+        # Add to results
+        all_attack_results['combined'] = results_df_comb
         
-        # print(f"\n✓ Completed combined dataset analysis")
+        print(f"\n✓ Completed combined dataset analysis")
         
         # Generate cross-attack summary (excluding combined)
         attack_only_results = {k: v for k, v in all_attack_results.items() if k != 'combined'}

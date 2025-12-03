@@ -5,15 +5,16 @@ from pathlib import Path
 import json
 from collections import defaultdict
 import warnings
+import traceback
+import pickle
 warnings.filterwarnings('ignore')
 
 # ML Libraries
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 import xgboost as xgb
 import shap
-from mrmr import mrmr_classif
 
 # Visualization
 import matplotlib.pyplot as plt
@@ -28,6 +29,10 @@ class Config:
     TARGET_COL = "attack"
     RANDOM_STATE = 42
     
+    # File names
+    TRAIN_FILE = "attack_and_normal.csv"
+    TEST_FILE = "attack_and_normal.csv"
+    
     # Model parameters
     XGB_PARAMS = {
         'max_depth': 6,
@@ -35,7 +40,8 @@ class Config:
         'n_estimators': 100,
         'objective': 'binary:logistic',
         'random_state': RANDOM_STATE,
-        'n_jobs': -1
+        'n_jobs': -1,
+        'verbosity': 0
     }
     
     RF_PARAMS = {
@@ -44,41 +50,69 @@ class Config:
         'random_state': RANDOM_STATE,
         'n_jobs': -1
     }
+    
+    # PCA parameters
+    PCA_VARIANCE_THRESHOLD = 0.95  # Retain 95% of variance
 
 # Create output directories
 os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
 os.makedirs(f"{Config.OUTPUT_DIR}/dataset_rankings", exist_ok=True)
 os.makedirs(f"{Config.OUTPUT_DIR}/visualizations", exist_ok=True)
 os.makedirs(f"{Config.OUTPUT_DIR}/visualizations/per_dataset", exist_ok=True)
+os.makedirs(f"{Config.OUTPUT_DIR}/checkpoints", exist_ok=True)
 
+# ============================================================================
+# PHASE 1: DATA DISCOVERY
+# ============================================================================
 
 def discover_datasets(base_dir):
-    """Recursively find all train/test dataset pairs."""
+    """Recursively find all train/test dataset pairs with specific file names."""
     datasets = []
     base_path = Path(base_dir)
+    
+    print("🔍 Scanning directory structure...")
     
     for train_dir in base_path.rglob("train"):
         test_dir = train_dir.parent / "test"
         
-        if test_dir.exists():
-            # Find CSV files
-            train_files = list(train_dir.glob("*.csv"))
-            test_files = list(test_dir.glob("*.csv"))
+        # Look for specific file names
+        train_file = train_dir / Config.TRAIN_FILE
+        test_file = test_dir / Config.TEST_FILE
+        
+        if train_file.exists() and test_file.exists():
+            # Create readable dataset name from path
+            relative_path = train_dir.parent.relative_to(base_path)
+            dataset_name = str(relative_path).replace(os.sep, "_")
             
-            if train_files and test_files:
-                # Create readable dataset name from path
-                relative_path = train_dir.parent.relative_to(base_path)
-                dataset_name = str(relative_path).replace(os.sep, "_")
-                
-                datasets.append({
-                    'name': dataset_name,
-                    'train_path': train_files[0],  # Take first CSV
-                    'test_path': test_files[0],
-                    'category': str(relative_path).split(os.sep)[0]
-                })
+            datasets.append({
+                'name': dataset_name,
+                'train_path': train_file,
+                'test_path': test_file,
+                'category': str(relative_path).split(os.sep)[0]
+            })
+            print(f"  ✓ Found: {dataset_name}")
+        else:
+            # Log missing files
+            if not train_file.exists():
+                print(f"  ✗ Missing train file: {train_file}")
+            if not test_file.exists():
+                print(f"  ✗ Missing test file: {test_file}")
     
     return datasets
 
+print("🔍 Phase 1: Discovering datasets...")
+datasets = discover_datasets(Config.BASE_DIR)
+print(f"\n✅ Found {len(datasets)} dataset pairs")
+
+if len(datasets) == 0:
+    print("❌ No datasets found! Please check the BASE_DIR path.")
+    exit(1)
+
+print(f"📊 Categories found: {set(d['category'] for d in datasets)}")
+
+# ============================================================================
+# PHASE 2: FEATURE IMPORTANCE CALCULATION
+# ============================================================================
 
 def load_and_prepare_data(train_path, test_path, target_col):
     """Load train/test data and prepare for modeling."""
@@ -87,9 +121,13 @@ def load_and_prepare_data(train_path, test_path, target_col):
         train_df = pd.read_csv(train_path)
         test_df = pd.read_csv(test_path)
         
+        print(f"  📦 Train shape: {train_df.shape}, Test shape: {test_df.shape}")
+        
         # Verify target column exists
         if target_col not in train_df.columns:
-            print(f"⚠️ Target column '{target_col}' not found. Available: {train_df.columns.tolist()}")
+            available_cols = train_df.columns.tolist()
+            print(f"  ⚠️ Target column '{target_col}' not found.")
+            print(f"  Available columns: {available_cols[:10]}...")
             return None
         
         # Separate features and target
@@ -98,37 +136,43 @@ def load_and_prepare_data(train_path, test_path, target_col):
         X_test = test_df.drop(columns=[target_col]) if target_col in test_df.columns else test_df
         y_test = test_df[target_col] if target_col in test_df.columns else None
         
-        # Handle categorical features
-        categorical_cols = X_train.select_dtypes(include=['object']).columns
-        if len(categorical_cols) > 0:
-            le = LabelEncoder()
-            for col in categorical_cols:
-                X_train[col] = le.fit_transform(X_train[col].astype(str))
-                if col in X_test.columns:
-                    X_test[col] = le.transform(X_test[col].astype(str))
+        # Store original feature names
+        original_features = X_train.columns.tolist()
+        
+        # Handle non-numeric columns
+        non_numeric_cols = X_train.select_dtypes(include=['object']).columns
+        if len(non_numeric_cols) > 0:
+            print(f"  🔧 Dropping {len(non_numeric_cols)} non-numeric columns")
+            X_train = X_train.drop(columns=non_numeric_cols)
+            X_test = X_test.drop(columns=non_numeric_cols)
         
         # Handle missing values
-        X_train = X_train.fillna(X_train.mean())
-        X_test = X_test.fillna(X_train.mean())
+        if X_train.isnull().any().any():
+            print(f"  🔧 Filling missing values")
+            X_train = X_train.fillna(X_train.mean())
+            X_test = X_test.fillna(X_train.mean())
         
-        # Remove constant features
-        constant_cols = X_train.columns[X_train.nunique() <= 1]
-        X_train = X_train.drop(columns=constant_cols)
-        X_test = X_test.drop(columns=constant_cols)
+        # Handle infinite values
+        X_train = X_train.replace([np.inf, -np.inf], np.nan).fillna(X_train.mean())
+        X_test = X_test.replace([np.inf, -np.inf], np.nan).fillna(X_train.mean())
+        
+        print(f"  ✓ Final feature count: {len(X_train.columns)}")
         
         return X_train, X_test, y_train, y_test
     
     except Exception as e:
-        print(f"❌ Error loading data: {str(e)}")
+        print(f"  ❌ Error loading data: {str(e)}")
+        traceback.print_exc()
         return None
 
 def calculate_xgboost_shap(X_train, X_test, y_train):
-    """Calculate feature importance using XGBoost + SHAP."""
+    """Calculate feature importance using XGBoost + SHAP (Supervised)."""
     try:
+        print("  🔧 Training XGBoost model...")
         model = xgb.XGBClassifier(**Config.XGB_PARAMS)
         model.fit(X_train, y_train)
         
-        # Calculate SHAP values
+        print("  🔧 Calculating SHAP values...")
         explainer = shap.TreeExplainer(model)
         shap_values = explainer.shap_values(X_train)
         
@@ -138,12 +182,14 @@ def calculate_xgboost_shap(X_train, X_test, y_train):
         return dict(zip(X_train.columns, mean_shap)), model, explainer, shap_values
     
     except Exception as e:
-        print(f"❌ XGBoost error: {str(e)}")
+        print(f"  ❌ XGBoost error: {str(e)}")
+        traceback.print_exc()
         return None, None, None, None
 
 def calculate_random_forest(X_train, X_test, y_train):
-    """Calculate feature importance using Random Forest."""
+    """Calculate feature importance using Random Forest (Supervised)."""
     try:
+        print("  🌲 Training Random Forest model...")
         model = RandomForestClassifier(**Config.RF_PARAMS)
         model.fit(X_train, y_train)
         
@@ -151,26 +197,44 @@ def calculate_random_forest(X_train, X_test, y_train):
         return dict(zip(X_train.columns, importances)), model
     
     except Exception as e:
-        print(f"❌ Random Forest error: {str(e)}")
+        print(f"  ❌ Random Forest error: {str(e)}")
+        traceback.print_exc()
         return None, None
 
-def calculate_mrmr(X_train, y_train, K=None):
-    """Calculate feature importance using MRMR."""
+def calculate_pca_importance(X_train):
+    """
+    Calculate feature importance using PCA (Unsupervised).
+    Features that contribute more to principal components are more important.
+    """
     try:
-        if K is None:
-            K = min(len(X_train.columns), Config.TOP_K_FEATURES * 2)
+        print("  🎯 Calculating PCA-based importance...")
         
-        # MRMR requires discrete target
-        selected_features = mrmr_classif(X=X_train, y=y_train, K=K)
+        # Standardize features
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X_train)
         
-        # Create scores (higher rank = higher importance)
-        scores = {feat: len(selected_features) - i for i, feat in enumerate(selected_features)}
+        # Fit PCA
+        pca = PCA(n_components=Config.PCA_VARIANCE_THRESHOLD, random_state=Config.RANDOM_STATE)
+        pca.fit(X_scaled)
         
-        return scores
+        # Calculate feature importance as weighted sum of absolute loadings
+        # Weight by explained variance ratio of each component
+        components = np.abs(pca.components_)
+        feature_importance = np.sum(
+            components * pca.explained_variance_ratio_[:, np.newaxis],
+            axis=0
+        )
+        
+        scores = dict(zip(X_train.columns, feature_importance))
+        
+        print(f"  ✓ PCA retained {pca.n_components_} components explaining {pca.explained_variance_ratio_.sum():.2%} variance")
+        
+        return scores, pca
     
     except Exception as e:
-        print(f"❌ MRMR error: {str(e)}")
-        return None
+        print(f"  ❌ PCA error: {str(e)}")
+        traceback.print_exc()
+        return None, None
 
 def normalize_scores(scores_dict):
     """Normalize scores to 0-1 range."""
@@ -185,7 +249,44 @@ def normalize_scores(scores_dict):
     
     return {k: (v - min_val) / (max_val - min_val) for k, v in scores_dict.items()}
 
-def process_single_dataset(dataset_info):
+def save_dataset_ranking(result, output_dir):
+    """Save individual dataset ranking to CSV."""
+    try:
+        dataset_name = result['dataset_name']
+        safe_name = dataset_name.replace('/', '_').replace('\\', '_')
+        
+        # Create ranking dataframe
+        ranking_data = []
+        
+        for feature in result['features']:
+            row = {'feature': feature}
+            
+            if 'xgb_shap_scores' in result:
+                row['xgb_shap_score'] = result['xgb_shap_scores'].get(feature, 0)
+            if 'rf_scores' in result:
+                row['rf_score'] = result['rf_scores'].get(feature, 0)
+            if 'pca_scores' in result:
+                row['pca_score'] = result['pca_scores'].get(feature, 0)
+            if 'combined_scores' in result:
+                row['combined_score'] = result['combined_scores'].get(feature, 0)
+            
+            ranking_data.append(row)
+        
+        ranking_df = pd.DataFrame(ranking_data)
+        ranking_df = ranking_df.sort_values('combined_score', ascending=False)
+        
+        # Save to CSV
+        output_path = f"{output_dir}/dataset_rankings/{safe_name}.csv"
+        ranking_df.to_csv(output_path, index=False)
+        print(f"  💾 Saved ranking to: {safe_name}.csv")
+        
+        return ranking_df
+    
+    except Exception as e:
+        print(f"  ❌ Error saving ranking: {str(e)}")
+        return None
+
+def process_single_dataset(dataset_info, output_dir):
     """Process a single dataset and calculate all importance scores."""
     name = dataset_info['name']
     print(f"\n{'='*80}")
@@ -203,217 +304,304 @@ def process_single_dataset(dataset_info):
         return None
     
     X_train, X_test, y_train, y_test = data
-    print(f"📦 Data shape: {X_train.shape}, Features: {len(X_train.columns)}")
+    
+    if len(X_train.columns) == 0:
+        print("  ❌ No features remaining after preprocessing")
+        return None
     
     results = {
         'dataset_name': name,
         'category': dataset_info['category'],
         'n_features': len(X_train.columns),
         'n_samples': len(X_train),
+        'n_attacks': int(y_train.sum()),
+        'n_normal': int((y_train == 0).sum()),
         'features': list(X_train.columns)
     }
     
-    # Method 1: XGBoost + SHAP
-    print("🔧 Calculating XGBoost + SHAP...")
+    # Method 1: XGBoost + SHAP (Supervised)
+    print("🔧 Method 1: XGBoost + SHAP (Supervised)")
     xgb_scores, xgb_model, explainer, shap_values = calculate_xgboost_shap(X_train, X_test, y_train)
     if xgb_scores:
         results['xgb_shap_scores'] = normalize_scores(xgb_scores)
         results['xgb_model'] = xgb_model
         results['shap_explainer'] = explainer
         results['shap_values'] = shap_values
+        print("  ✓ XGBoost + SHAP completed")
     
-    # Method 2: Random Forest
-    print("🌲 Calculating Random Forest...")
+    # Method 2: Random Forest (Supervised)
+    print("🌲 Method 2: Random Forest (Supervised)")
     rf_scores, rf_model = calculate_random_forest(X_train, X_test, y_train)
     if rf_scores:
         results['rf_scores'] = normalize_scores(rf_scores)
         results['rf_model'] = rf_model
+        print("  ✓ Random Forest completed")
     
-    # Method 3: MRMR
-    print("🎯 Calculating MRMR...")
-    mrmr_scores = calculate_mrmr(X_train, y_train)
-    if mrmr_scores:
-        results['mrmr_scores'] = normalize_scores(mrmr_scores)
+    # Method 3: PCA (Unsupervised)
+    print("🎯 Method 3: PCA-based (Unsupervised)")
+    pca_scores, pca_model = calculate_pca_importance(X_train)
+    if pca_scores:
+        results['pca_scores'] = normalize_scores(pca_scores)
+        results['pca_model'] = pca_model
+        print("  ✓ PCA completed")
     
     # Calculate combined score (equal weights)
-    if all(k in results for k in ['xgb_shap_scores', 'rf_scores', 'mrmr_scores']):
+    if all(k in results for k in ['xgb_shap_scores', 'rf_scores', 'pca_scores']):
         combined = defaultdict(list)
-        for method in ['xgb_shap_scores', 'rf_scores', 'mrmr_scores']:
+        for method in ['xgb_shap_scores', 'rf_scores', 'pca_scores']:
             for feat, score in results[method].items():
                 combined[feat].append(score)
         
         results['combined_scores'] = {
             feat: np.mean(scores) for feat, scores in combined.items()
         }
+        print("  ✓ Combined scores calculated")
     
     # Store data for visualization
     results['X_train'] = X_train
     
+    # Save individual dataset ranking
+    save_dataset_ranking(results, output_dir)
+    
     return results
 
+# ============================================================================
+# PHASE 3: PROCESS ALL DATASETS WITH CHECKPOINTING
+# ============================================================================
 
+print("\n" + "="*80)
+print("🚀 Phase 2: Processing all datasets...")
+print("="*80)
 
-if __name__ == "__main__":
-    print("🔍 Phase 1: Discovering datasets...")
-    datasets = discover_datasets(Config.BASE_DIR)
-    print(f"✅ Found {len(datasets)} dataset pairs")
-    print(f"📊 Categories: {set(d['category'] for d in datasets)}")
-   
-    print("\n" + "="*80)
-    print("🚀 Phase 2: Processing all datasets...")
-    print("="*80)
-
+# Check for existing checkpoint
+checkpoint_file = f"{Config.OUTPUT_DIR}/checkpoints/progress.pkl"
+if os.path.exists(checkpoint_file):
+    print("📂 Found existing checkpoint, loading...")
+    with open(checkpoint_file, 'rb') as f:
+        checkpoint = pickle.load(f)
+        all_results = checkpoint['results']
+        failed_datasets = checkpoint['failed']
+        processed_indices = checkpoint['processed_indices']
+    print(f"✓ Loaded {len(all_results)} previously processed datasets")
+else:
     all_results = []
     failed_datasets = []
+    processed_indices = set()
 
-    for dataset_info in tqdm(datasets, desc="Processing datasets"):
-        try:
-            result = process_single_dataset(dataset_info)
-            if result:
-                all_results.append(result)
-            else:
-                failed_datasets.append(dataset_info['name'])
-        except Exception as e:
-            print(f"❌ Failed to process {dataset_info['name']}: {str(e)}")
+error_log = []
+
+for idx, dataset_info in enumerate(tqdm(datasets, desc="Processing datasets")):
+    # Skip if already processed
+    if idx in processed_indices:
+        continue
+    
+    try:
+        result = process_single_dataset(dataset_info, Config.OUTPUT_DIR)
+        if result:
+            all_results.append(result)
+            processed_indices.add(idx)
+        else:
             failed_datasets.append(dataset_info['name'])
-
-    print(f"\n✅ Successfully processed: {len(all_results)}/{len(datasets)} datasets")
-    if failed_datasets:
-        print(f"⚠️ Failed datasets: {', '.join(failed_datasets)}")
-
-
-    print("\n" + "="*80)
-    print("📊 Phase 3: Aggregating results...")
-    print("="*80)
-
-    # Aggregate feature scores across datasets
-    feature_global_scores = defaultdict(lambda: {'scores': [], 'datasets': [], 'count': 0})
-
-    for result in all_results:
-        if 'combined_scores' in result:
-            for feat, score in result['combined_scores'].items():
-                feature_global_scores[feat]['scores'].append(score)
-                feature_global_scores[feat]['datasets'].append(result['dataset_name'])
-                feature_global_scores[feat]['count'] += 1
-
-    # Calculate global rankings
-    global_ranking = []
-    for feat, data in feature_global_scores.items():
-        global_ranking.append({
-            'feature': feat,
-            'avg_importance': np.mean(data['scores']),
-            'std_importance': np.std(data['scores']),
-            'appearances': data['count'],
-            'datasets': '; '.join(data['datasets'][:3]) + ('...' if len(data['datasets']) > 3 else '')
+            error_log.append({
+                'dataset': dataset_info['name'],
+                'error': 'Processing returned None',
+                'index': idx
+            })
+    except Exception as e:
+        error_msg = str(e)
+        error_trace = traceback.format_exc()
+        print(f"❌ Failed to process {dataset_info['name']}: {error_msg}")
+        failed_datasets.append(dataset_info['name'])
+        error_log.append({
+            'dataset': dataset_info['name'],
+            'error': error_msg,
+            'traceback': error_trace,
+            'index': idx
         })
+    
+    # Save checkpoint every 5 datasets
+    if (idx + 1) % 5 == 0:
+        checkpoint = {
+            'results': all_results,
+            'failed': failed_datasets,
+            'processed_indices': processed_indices
+        }
+        with open(checkpoint_file, 'wb') as f:
+            pickle.dump(checkpoint, f)
+        print(f"\n💾 Checkpoint saved ({len(all_results)}/{len(datasets)} completed)")
 
-    global_ranking_df = pd.DataFrame(global_ranking)
-    global_ranking_df = global_ranking_df.sort_values('avg_importance', ascending=False)
+# Final checkpoint save
+checkpoint = {
+    'results': all_results,
+    'failed': failed_datasets,
+    'processed_indices': processed_indices
+}
+with open(checkpoint_file, 'wb') as f:
+    pickle.dump(checkpoint, f)
 
-    # Save global ranking
-    global_ranking_df.to_csv(f"{Config.OUTPUT_DIR}/global_ranking.csv", index=False)
-    print(f"💾 Saved global ranking to {Config.OUTPUT_DIR}/global_ranking.csv")
+# Save error log
+if error_log:
+    error_df = pd.DataFrame(error_log)
+    error_df.to_csv(f"{Config.OUTPUT_DIR}/error_log.csv", index=False)
+    print(f"\n⚠️ Error log saved to {Config.OUTPUT_DIR}/error_log.csv")
 
-    print("\n" + "="*80)
-    print("📈 Phase 4: Creating visualizations...")
-    print("="*80)
+print(f"\n✅ Successfully processed: {len(all_results)}/{len(datasets)} datasets")
+if failed_datasets:
+    print(f"⚠️ Failed datasets ({len(failed_datasets)}): {', '.join(failed_datasets[:5])}{'...' if len(failed_datasets) > 5 else ''}")
 
-    # 1. Global Top K Features
-    plt.figure(figsize=(12, 8))
-    top_features = global_ranking_df.head(Config.TOP_K_FEATURES)
-    plt.barh(range(len(top_features)), top_features['avg_importance'])
-    plt.yticks(range(len(top_features)), top_features['feature'])
-    plt.xlabel('Average Normalized Importance Score')
-    plt.title(f'Top {Config.TOP_K_FEATURES} Features Globally (Combined Methods)')
+# ============================================================================
+# PHASE 4: AGGREGATION & GLOBAL RANKING
+# ============================================================================
+
+print("\n" + "="*80)
+print("📊 Phase 3: Aggregating results...")
+print("="*80)
+
+if len(all_results) == 0:
+    print("❌ No results to aggregate! Check error log.")
+    exit(1)
+
+# Aggregate feature scores across datasets
+feature_global_scores = defaultdict(lambda: {
+    'xgb_scores': [], 'rf_scores': [], 'pca_scores': [], 'combined_scores': [],
+    'datasets': [], 'count': 0
+})
+
+for result in all_results:
+    for feat in result['features']:
+        if feat in result.get('combined_scores', {}):
+            feature_global_scores[feat]['combined_scores'].append(result['combined_scores'][feat])
+            feature_global_scores[feat]['xgb_scores'].append(result.get('xgb_shap_scores', {}).get(feat, 0))
+            feature_global_scores[feat]['rf_scores'].append(result.get('rf_scores', {}).get(feat, 0))
+            feature_global_scores[feat]['pca_scores'].append(result.get('pca_scores', {}).get(feat, 0))
+            feature_global_scores[feat]['datasets'].append(result['dataset_name'])
+            feature_global_scores[feat]['count'] += 1
+
+# Calculate global rankings
+global_ranking = []
+for feat, data in feature_global_scores.items():
+    global_ranking.append({
+        'feature': feat,
+        'avg_combined_importance': np.mean(data['combined_scores']),
+        'std_combined_importance': np.std(data['combined_scores']),
+        'avg_xgb_importance': np.mean(data['xgb_scores']),
+        'avg_rf_importance': np.mean(data['rf_scores']),
+        'avg_pca_importance': np.mean(data['pca_scores']),
+        'appearances': data['count'],
+        'datasets': '; '.join(data['datasets'][:3]) + ('...' if len(data['datasets']) > 3 else '')
+    })
+
+global_ranking_df = pd.DataFrame(global_ranking)
+global_ranking_df = global_ranking_df.sort_values('avg_combined_importance', ascending=False)
+
+# Save global ranking
+global_ranking_df.to_csv(f"{Config.OUTPUT_DIR}/global_ranking.csv", index=False)
+print(f"💾 Saved global ranking to {Config.OUTPUT_DIR}/global_ranking.csv")
+
+# ============================================================================
+# PHASE 5: VISUALIZATION
+# ============================================================================
+
+print("\n" + "="*80)
+print("📈 Phase 4: Creating visualizations...")
+print("="*80)
+
+# 1. Global Top K Features
+plt.figure(figsize=(14, 8))
+top_features = global_ranking_df.head(Config.TOP_K_FEATURES)
+colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(top_features)))
+plt.barh(range(len(top_features)), top_features['avg_combined_importance'], color=colors)
+plt.yticks(range(len(top_features)), top_features['feature'], fontsize=10)
+plt.xlabel('Average Combined Importance Score', fontsize=12)
+plt.title(f'Top {Config.TOP_K_FEATURES} Features Globally\n(XGBoost+SHAP + Random Forest + PCA)', fontsize=14, fontweight='bold')
+plt.gca().invert_yaxis()
+plt.grid(axis='x', alpha=0.3)
+plt.tight_layout()
+plt.savefig(f"{Config.OUTPUT_DIR}/visualizations/global_top{Config.TOP_K_FEATURES}.png", dpi=300, bbox_inches='tight')
+plt.close()
+print("✓ Global ranking visualization saved")
+
+# 2. Per-dataset rankings (ALL DATASETS)
+print(f"Creating visualizations for all {len(all_results)} datasets...")
+for result in tqdm(all_results, desc="Creating per-dataset visualizations"):
+    if 'combined_scores' not in result:
+        continue
+    
+    dataset_name = result['dataset_name']
+    safe_name = dataset_name.replace('/', '_').replace('\\', '_')
+    
+    scores_df = pd.DataFrame([
+        {'feature': k, 'score': v} 
+        for k, v in result['combined_scores'].items()
+    ]).sort_values('score', ascending=False).head(Config.TOP_K_FEATURES)
+    
+    plt.figure(figsize=(12, 7))
+    colors = plt.cm.plasma(np.linspace(0.3, 0.9, len(scores_df)))
+    plt.barh(range(len(scores_df)), scores_df['score'], color=colors)
+    plt.yticks(range(len(scores_df)), scores_df['feature'], fontsize=9)
+    plt.xlabel('Combined Importance Score', fontsize=11)
+    plt.title(f'Top {Config.TOP_K_FEATURES} Features: {dataset_name}\nCategory: {result["category"]}', 
+              fontsize=12, fontweight='bold')
     plt.gca().invert_yaxis()
+    plt.grid(axis='x', alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f"{Config.OUTPUT_DIR}/visualizations/global_top{Config.TOP_K_FEATURES}.png", dpi=300, bbox_inches='tight')
+    
+    plt.savefig(f"{Config.OUTPUT_DIR}/visualizations/per_dataset/{safe_name}.png", dpi=300, bbox_inches='tight')
     plt.close()
 
-    # 2. Per-dataset rankings
-    for result in tqdm(all_results[:10], desc="Creating per-dataset visualizations"):  # Limit to first 10 for demo
-        if 'combined_scores' not in result:
-            continue
-        
-        dataset_name = result['dataset_name']
-        scores_df = pd.DataFrame([
-            {'feature': k, 'score': v} 
-            for k, v in result['combined_scores'].items()
-        ]).sort_values('score', ascending=False).head(Config.TOP_K_FEATURES)
-        
-        plt.figure(figsize=(10, 6))
-        plt.barh(range(len(scores_df)), scores_df['score'])
-        plt.yticks(range(len(scores_df)), scores_df['feature'])
-        plt.xlabel('Combined Importance Score')
-        plt.title(f'Top {Config.TOP_K_FEATURES} Features: {dataset_name}')
-        plt.gca().invert_yaxis()
-        plt.tight_layout()
-        
-        safe_name = dataset_name.replace('/', '_').replace('\\', '_')
-        plt.savefig(f"{Config.OUTPUT_DIR}/visualizations/per_dataset/{safe_name}.png", dpi=300, bbox_inches='tight')
-        plt.close()
+print(f"✓ Created {len(all_results)} per-dataset visualizations")
 
-    # 3. Method Comparison (Correlation)
-    print("📊 Creating method comparison...")
-    method_scores = defaultdict(lambda: {'xgb': [], 'rf': [], 'mrmr': []})
 
-    for result in all_results:
-        if all(k in result for k in ['xgb_shap_scores', 'rf_scores', 'mrmr_scores']):
-            for feat in result['features']:
-                if feat in result['xgb_shap_scores']:
-                    method_scores[feat]['xgb'].append(result['xgb_shap_scores'].get(feat, 0))
-                    method_scores[feat]['rf'].append(result['rf_scores'].get(feat, 0))
-                    method_scores[feat]['mrmr'].append(result['mrmr_scores'].get(feat, 0))
 
-    # Calculate average scores per method
-    method_avg = {
-        'XGBoost+SHAP': [],
-        'Random Forest': [],
-        'MRMR': []
+# ============================================================================
+# FINAL SUMMARY
+# ============================================================================
+
+print("\n" + "="*80)
+print("✅ EXECUTION COMPLETE!")
+print("="*80)
+
+print(f"\n📊 Processing Summary:")
+print(f"  • Total datasets found: {len(datasets)}")
+print(f"  • Successfully processed: {len(all_results)}")
+print(f"  • Failed: {len(failed_datasets)}")
+print(f"  • Unique features discovered: {len(global_ranking_df)}")
+
+print(f"\n🏆 Top 10 Most Important Features Globally:")
+print(global_ranking_df.head(10)[['feature', 'avg_combined_importance', 'appearances']].to_string(index=False))
+
+# Save metadata
+metadata = {
+    'total_datasets': len(datasets),
+    'processed_datasets': len(all_results),
+    'failed_datasets': failed_datasets,
+    'total_unique_features': len(global_ranking_df),
+    'top_features': global_ranking_df.head(20).to_dict('records'),
+    'categories': list(set(d['category'] for d in datasets)),
+    'category_stats': category_stats,
+    'config': {
+        'top_k_features': Config.TOP_K_FEATURES,
+        'target_col': Config.TARGET_COL,
+        'train_file': Config.TRAIN_FILE,
+        'test_file': Config.TEST_FILE
     }
+}
 
-    for feat_data in method_scores.values():
-        if feat_data['xgb']:
-            method_avg['XGBoost+SHAP'].append(np.mean(feat_data['xgb']))
-            method_avg['Random Forest'].append(np.mean(feat_data['rf']))
-            method_avg['MRMR'].append(np.mean(feat_data['mrmr']))
+with open(f"{Config.OUTPUT_DIR}/metadata.json", 'w') as f:
+    json.dump(metadata, f, indent=2, default=str)
 
-    comparison_df = pd.DataFrame(method_avg)
-    correlation_matrix = comparison_df.corr()
+print(f"\n📁 Results saved to: {Config.OUTPUT_DIR}/")
+print(f"   ├── global_ranking.csv ({len(global_ranking_df)} features)")
+print(f"   ├── dataset_rankings/ ({len(all_results)} files)")
+print(f"   ├── visualizations/")
+print(f"   │   ├── global_top{Config.TOP_K_FEATURES}.png")
+print(f"   │   ├── method_comparison.png")
+print(f"   │   ├── category_analysis.png")
+print(f"   │   └── per_dataset/ ({len(all_results)} visualizations)")
+print(f"   ├── metadata.json")
+print(f"   └── checkpoints/progress.pkl")
 
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0, 
-                square=True, linewidths=1, cbar_kws={"shrink": 0.8})
-    plt.title('Correlation Between Feature Importance Methods')
-    plt.tight_layout()
-    plt.savefig(f"{Config.OUTPUT_DIR}/visualizations/method_comparison.png", dpi=300, bbox_inches='tight')
-    plt.close()
+if error_log:
+    print(f"\n⚠️  Check error_log.csv for details on {len(failed_datasets)} failed datasets")
 
-    # ============================================================================
-    # FINAL SUMMARY
-    # ============================================================================
-
-    print("\n" + "="*80)
-    print("✅ EXECUTION COMPLETE!")
-    print("="*80)
-    print(f"\n📁 Results saved to: {Config.OUTPUT_DIR}/")
-    print(f"\n🏆 Top 10 Most Important Features Globally:")
-    print(global_ranking_df.head(10)[['feature', 'avg_importance', 'appearances']].to_string(index=False))
-
-    # Save metadata
-    metadata = {
-        'total_datasets': len(datasets),
-        'processed_datasets': len(all_results),
-        'failed_datasets': failed_datasets,
-        'total_unique_features': len(global_ranking_df),
-        'top_features': global_ranking_df.head(20).to_dict('records'),
-        'categories': list(set(d['category'] for d in datasets))
-    }
-
-    with open(f"{Config.OUTPUT_DIR}/metadata.json", 'w') as f:
-        json.dump(metadata, f, indent=2)
-
-    print(f"\n📄 Full results available in:")
-    print(f"   - Global ranking: {Config.OUTPUT_DIR}/global_ranking.csv")
-    print(f"   - Visualizations: {Config.OUTPUT_DIR}/visualizations/")
-    print(f"   - Metadata: {Config.OUTPUT_DIR}/metadata.json")
+print("\n🎉 All done! Check the results directory for outputs.")
