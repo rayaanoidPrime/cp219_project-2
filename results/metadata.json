@@ -1,0 +1,155 @@
+{
+  "total_datasets": 51,
+  "processed_datasets": 51,
+  "failed_datasets": [],
+  "total_unique_features": 26,
+  "top_features": [
+    {
+      "feature": "integer_5",
+      "avg_importance": 0.791144470454451,
+      "std_importance": 0.09489541558543502,
+      "appearances": 2,
+      "datasets": "IEC_Security_LIED10MEASLLN0$Measurement_DM1; IEC_Security_LIED22MEASLLN0$Measurement_DM3"
+    },
+    {
+      "feature": "integer_7",
+      "avg_importance": 0.7209475100441813,
+      "std_importance": 0.18645989736322605,
+      "appearances": 2,
+      "datasets": "IEC_Security_LIED10MEASLLN0$Measurement_DM1; IEC_Security_LIED22MEASLLN0$Measurement_DM3"
+    },
+    {
+      "feature": "integer_6",
+      "avg_importance": 0.7043850011865374,
+      "std_importance": 0.13538827119127222,
+      "appearances": 2,
+      "datasets": "IEC_Security_LIED10MEASLLN0$Measurement_DM1; IEC_Security_LIED22MEASLLN0$Measurement_DM3"
+    },
+    {
+      "feature": "integer_8",
+      "avg_importance": 0.5986806924185396,
+      "std_importance": 0.1107210169831698,
+      "appearances": 2,
+      "datasets": "IEC_Security_LIED10MEASLLN0$Measurement_DM1; IEC_Security_LIED22MEASLLN0$Measurement_DM3"
+    },
+    {
+      "feature": "timestamp_diff",
+      "avg_importance": 0.5845408881048634,
+      "std_importance": 0.26955938535595075,
+      "appearances": 42,
+      "datasets": "GOOSE_secure_GOOSE_Ctrl15_spoofing_fault; GOOSE_secure_GOOSE_Ctrl15_spoofing_stable; IEC_Security_LIED10CTRLLN0$Status_DoS1..."
+    },
+    {
+      "feature": "numDatSetEntries",
+      "avg_importance": 0.5270730334713742,
+      "std_importance": 0.04665659803890593,
+      "appearances": 2,
+      "datasets": "IEC_Security_LIED10CTRLLN0$Status_DoS1; IEC_Security_LIED12CTRLLLN0$Status_DOS1"
+    },
+    {
+      "feature": "integer_1",
+      "avg_importance": 0.4734923108447108,
+      "std_importance": 0.23055056003100136,
+      "appearances": 11,
+      "datasets": "IEC_Security_LIED10CTRLLN0$Status_DoS1; IEC_Security_LIED10MEASLLN0$Measurement_DM1; IEC_Security_LIED12CTRLLLN0$Status_DOS1..."
+    },
+    {
+      "feature": "stNum",
+      "avg_importance": 0.4391425109024118,
+      "std_importance": 0.31782135929739347,
+      "appearances": 41,
+      "datasets": "GOOSE_secure_GOOSE_Ctrl15_spoofing_fault; GOOSE_secure_GOOSE_Ctrl15_spoofing_stable; IEC_Security_LIED10CTRLLN0$Status_DoS1..."
+    },
+    {
+      "feature": "time_diff",
+      "avg_importance": 0.3886925767258474,
+      "std_importance": 0.20768715303584745,
+      "appearances": 42,
+      "datasets": "GOOSE_secure_GOOSE_Ctrl15_spoofing_fault; GOOSE_secure_GOOSE_Ctrl15_spoofing_stable; IEC_Security_LIED10CTRLLN0$Status_DoS1..."
+    },
+    {
+      "feature": "integer_2",
+      "avg_importance": 0.3879516298765727,
+      "std_importance": 0.20955811122719475,
+      "appearances": 9,
+      "datasets": "IEC_Security_LIED10CTRLLN0$Status_DoS1; IEC_Security_LIED10MEASLLN0$Measurement_DM1; IEC_Security_LIED12CTRLLLN0$Status_DOS1..."
+    },
+    {
+      "feature": "index",
+      "avg_importance": 0.3792873526203675,
+      "std_importance": 0.2381452045131953,
+      "appearances": 42,
+      "datasets": "GOOSE_secure_GOOSE_Ctrl15_spoofing_fault; GOOSE_secure_GOOSE_Ctrl15_spoofing_stable; IEC_Security_LIED10CTRLLN0$Status_DoS1..."
+    },
+    {
+      "feature": "floatvalue_1",
+      "avg_importance": 0.37137470091818486,
+      "std_importance": 0.19570986477733576,
+      "appearances": 7,
+      "datasets": "IEC_Security_LIED10MEASLLN0$Measurement_DM1; IEC_Security_LIED22MEASLLN0$Measurement_DM3; Power_Duck_Abgang1_6md85_MEAS_LLN0_Control_DataSet_insertion_3..."
+    },
+    {
+      "feature": "stNum_diff",
+      "avg_importance": 0.3647497104272644,
+      "std_importance": 0.25310473936566685,
+      "appearances": 41,
+      "datasets": "GOOSE_secure_GOOSE_Ctrl15_spoofing_fault; GOOSE_secure_GOOSE_Ctrl15_spoofing_stable; IEC_Security_LIED10CTRLLN0$Status_DoS1..."
+    },
+    {
+      "feature": "timeAllowedtoLive",
+      "avg_importance": 0.3326015645090149,
+      "std_importance": 0.0712088363292047,
+      "appearances": 4,
+      "datasets": "NTT_2025_physical_disjunctor_1_masquerade; NTT_2025_physical_disjunctor_1_replay; NTT_2025_simulated_trip2_masquerade..."
+    },
+    {
+      "feature": "floatvalue_2",
+      "avg_importance": 0.3211099533602239,
+      "std_importance": 0.2842617436911279,
+      "appearances": 7,
+      "datasets": "IEC_Security_LIED10MEASLLN0$Measurement_DM1; IEC_Security_LIED22MEASLLN0$Measurement_DM3; Power_Duck_Abgang1_6md85_MEAS_LLN0_Control_DataSet_insertion_3..."
+    },
+    {
+      "feature": "floatvalue_3",
+      "avg_importance": 0.30976270798743843,
+      "std_importance": 0.2302330658924409,
+      "appearances": 5,
+      "datasets": "Power_Duck_Abgang1_6md85_MEAS_LLN0_Control_DataSet_insertion_3; Power_Duck_Abgang1_6md85_MEAS_LLN0_Control_DataSet_insertion_4; Power_Duck_Abgang1_6md85_MEAS_LLN0_Control_DataSet_insertion_5..."
+    },
+    {
+      "feature": "Length",
+      "avg_importance": 0.3013778804173342,
+      "std_importance": 0.32532324973153276,
+      "appearances": 42,
+      "datasets": "GOOSE_secure_GOOSE_Ctrl15_spoofing_fault; GOOSE_secure_GOOSE_Ctrl15_spoofing_stable; IEC_Security_LIED10CTRLLN0$Status_DoS1..."
+    },
+    {
+      "feature": "freq",
+      "avg_importance": 0.2878036065028423,
+      "std_importance": 0.21252688369947423,
+      "appearances": 42,
+      "datasets": "GOOSE_secure_GOOSE_Ctrl15_spoofing_fault; GOOSE_secure_GOOSE_Ctrl15_spoofing_stable; IEC_Security_LIED10CTRLLN0$Status_DoS1..."
+    },
+    {
+      "feature": "integer_3",
+      "avg_importance": 0.2757751967599622,
+      "std_importance": 0.1764314207011936,
+      "appearances": 16,
+      "datasets": "IEC_Security_LIED10CTRLLN0$Status_DoS1; IEC_Security_LIED10MEASLLN0$Measurement_DM1; IEC_Security_LIED12CTRLLLN0$Status_DOS1..."
+    },
+    {
+      "feature": "sqNum_diff",
+      "avg_importance": 0.2706106309921615,
+      "std_importance": 0.1718237878005346,
+      "appearances": 42,
+      "datasets": "GOOSE_secure_GOOSE_Ctrl15_spoofing_fault; GOOSE_secure_GOOSE_Ctrl15_spoofing_stable; IEC_Security_LIED10CTRLLN0$Status_DoS1..."
+    }
+  ],
+  "categories": [
+    "Process_Bus",
+    "Power_Duck",
+    "IEC_Security",
+    "NTT_2025",
+    "GOOSE_secure"
+  ]
+}
