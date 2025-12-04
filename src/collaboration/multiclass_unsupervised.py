@@ -156,8 +156,6 @@ class MultiClassDetector:
             
             # Print sampling stats
             unique_sampled, sampled_counts = np.unique(y_train_sample, return_counts=True)
-            print(f"         Original distribution: {dict(zip(unique_classes, class_counts))}")
-            print(f"         Sampled distribution: {dict(zip(unique_sampled, sampled_counts))}")
         else:
             X_train_sample = X_train
             y_train_sample = y_train_true
@@ -873,6 +871,14 @@ class DatasetLoader:
         all_test_dfs = []
         scenario_names = []
         reference_columns = None
+
+        IMP_FEATURES = [
+            'integer_7', 'integer_5', 'integer_8', 'integer_6',
+            'timestamp_diff', 'stNum', 'time_diff',
+            'floatvalue_3', 'floatvalue_1', 'freq',
+            'Length', 'index', 'floatvalue_2',
+            'stNum_diff', 'sqNum_diff'
+        ]
         
         # Load all scenarios
         for scenario in scenarios:
@@ -888,8 +894,12 @@ class DatasetLoader:
             train_df, test_df, scenario_name = result
             
             # Get feature columns (exclude 'attack')
-            train_features = sorted([col for col in train_df.columns if col != 'attack'])
-            test_features = sorted([col for col in test_df.columns if col != 'attack'])
+            all_train_features = [col for col in train_df.columns if col != 'attack']
+            all_test_features = [col for col in test_df.columns if col != 'attack']
+            
+            # Filter to only target columns that exist
+            train_features = sorted([col for col in all_train_features if col in IMP_FEATURES])
+            test_features = sorted([col for col in all_test_features if col in IMP_FEATURES])
             
             # Validate train and test have same features
             if train_features != test_features:
@@ -934,8 +944,7 @@ class DatasetLoader:
         train_combined.replace([np.inf, -np.inf], np.nan, inplace=True)
         test_combined.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-        initial_features = [col for col in train_combined.columns if col not in ['attack', 'attack_numeric', 'attack_scenario']]
-        
+        initial_features = reference_columns         
         # Find columns that have NaNs in EITHER Train or Test
         train_nans = train_combined[initial_features].columns[train_combined[initial_features].isna().any()].tolist()
         test_nans = test_combined[initial_features].columns[test_combined[initial_features].isna().any()].tolist()
