@@ -49,23 +49,14 @@ class MultiClassDetector:
     def fit(self, X):
         """Train the clustering model."""
         start = time.time()
-         # --- FIX: Prevent Memory Explosion in Hierarchical Clustering ---
-        if isinstance(self.model, AgglomerativeClustering) and len(X) > 100000:
-            print(f"      ⚠️  Large dataset ({len(X)}). Downsampling Hierarchical fit to 50k samples.")
-            # Randomly sample 50k points for structure learning
-            np.random.seed(42)
-            indices = np.random.choice(len(X), 50000, replace=False)
-            self.X_train_ = X[indices].copy()
-            
-            self.model.fit(self.X_train_)
+        
+        # No downsampling here - it's handled in fit_and_map
+        self.model.fit(X)
+        
+        # For Hierarchical, store full data
+        if isinstance(self.model, AgglomerativeClustering):
+            self.X_train_ = X.copy()
             self.train_cluster_labels_ = self.model.labels_.copy()
-        else:
-            # Standard fit for K-Means, GMM, or small Hierarchical
-            self.model.fit(X)
-             # For Hierarchical, we must store X to predict new samples later
-            if isinstance(self.model, AgglomerativeClustering):
-                self.X_train_ = X.copy()
-                self.train_cluster_labels_ = self.model.labels_.copy()
 
         self.train_time = time.time() - start
         return self
@@ -125,21 +116,65 @@ class MultiClassDetector:
     def fit_and_map(self, X_train, y_train_true):
         """
         Fit model and learn cluster-to-class mapping using training set.
+        Uses proportional downsampling if dataset is large.
         """
-        # Fit model
-        self.fit(X_train)
+        # --- Proportional downsampling for large datasets ---
+        if len(X_train) > 40000:
+            target_size = 20000
+            print(f"      ⚠️  Large dataset ({len(X_train)}). Proportional downsampling to {target_size} samples.")
+            
+            # Calculate samples per class proportionally
+            unique_classes, class_counts = np.unique(y_train_true, return_counts=True)
+            total_samples = len(X_train)
+            
+            sampled_indices = []
+            np.random.seed(42)
+            
+            for cls, count in zip(unique_classes, class_counts):
+                # Calculate proportional sample size for this class
+                cls_target = int((count / total_samples) * target_size)
+                # Ensure at least some samples from each class (min 10 or available count)
+                cls_target = max(min(10, count), cls_target)
+                
+                # Get indices for this class
+                cls_indices = np.where(y_train_true == cls)[0]
+                
+                # Sample (with or without replacement depending on availability)
+                if len(cls_indices) <= cls_target:
+                    sampled_indices.extend(cls_indices)
+                else:
+                    sampled = np.random.choice(cls_indices, cls_target, replace=False)
+                    sampled_indices.extend(sampled)
+            
+            # Shuffle the combined indices
+            np.random.shuffle(sampled_indices)
+            sampled_indices = np.array(sampled_indices)
+            
+            # Downsample both X and y
+            X_train_sample = X_train[sampled_indices]
+            y_train_sample = y_train_true[sampled_indices]
+            
+            # Print sampling stats
+            unique_sampled, sampled_counts = np.unique(y_train_sample, return_counts=True)
+            print(f"         Original distribution: {dict(zip(unique_classes, class_counts))}")
+            print(f"         Sampled distribution: {dict(zip(unique_sampled, sampled_counts))}")
+        else:
+            X_train_sample = X_train
+            y_train_sample = y_train_true
         
-        # Get cluster predictions on training set
-        if hasattr(self.model, 'labels_') and len(self.model.labels_) == len(X_train):
-            # If lengths match (KMeans, GMM, or small Hierarchical)
+        # Fit model on sampled data
+        self.fit(X_train_sample)
+        
+        # Get cluster predictions on sampled training set
+        if hasattr(self.model, 'labels_') and len(self.model.labels_) == len(X_train_sample):
             y_train_clusters = self.model.labels_
         else:
-            # If lengths differ (Downsampled Hierarchical) or model has no labels_
-            y_train_clusters = self.predict_clusters(X_train)
+            y_train_clusters = self.predict_clusters(X_train_sample)
         
-        # Learn optimal mapping
+        # Learn optimal mapping using SAMPLED data
         self.cluster_to_class_map_ = self._find_optimal_mapping(
-            y_train_true, y_train_clusters
+            y_train_sample,  # Use sampled labels, not original
+            y_train_clusters
         )
         
         return self
@@ -503,16 +538,53 @@ class AutoencoderDetector(MultiClassDetector):
         return self
     
     def fit_and_map(self, X_train, y_train_true):
-        """FIX: Override to handle latent space transformation."""
-        # Fit model
-        self.fit(X_train)
+        """Override to handle latent space transformation with proportional sampling."""
+        # --- Proportional downsampling for large datasets ---
+        if len(X_train) > 40000:
+            target_size = 20000
+            print(f"      ⚠️  Large dataset ({len(X_train)}). Proportional downsampling to {target_size} samples.")
+            
+            unique_classes, class_counts = np.unique(y_train_true, return_counts=True)
+            total_samples = len(X_train)
+            
+            sampled_indices = []
+            np.random.seed(42)
+            
+            for cls, count in zip(unique_classes, class_counts):
+                cls_target = int((count / total_samples) * target_size)
+                cls_target = max(min(10, count), cls_target)
+                
+                cls_indices = np.where(y_train_true == cls)[0]
+                
+                if len(cls_indices) <= cls_target:
+                    sampled_indices.extend(cls_indices)
+                else:
+                    sampled = np.random.choice(cls_indices, cls_target, replace=False)
+                    sampled_indices.extend(sampled)
+            
+            np.random.shuffle(sampled_indices)
+            sampled_indices = np.array(sampled_indices)
+            
+            X_train_sample = X_train[sampled_indices]
+            y_train_sample = y_train_true[sampled_indices]
+            
+            unique_sampled, sampled_counts = np.unique(y_train_sample, return_counts=True)
+            print(f"         Original distribution: {dict(zip(unique_classes, class_counts))}")
+            print(f"         Sampled distribution: {dict(zip(unique_sampled, sampled_counts))}")
+        else:
+            X_train_sample = X_train
+            y_train_sample = y_train_true
+        
+        # Fit model on sampled data
+        self.fit(X_train_sample)
         
         # Get cluster predictions on training set (in latent space)
         y_train_clusters = self.clustering_model.labels_
         
-        # Learn optimal mapping
+        # Learn optimal mapping using SAMPLED data
         self.cluster_to_class_map_ = self._find_optimal_mapping(
-            y_train_true, y_train_clusters
+            y_train_sample,  # Use sampled labels
+            y_train_clusters
         )
         
         return self
@@ -616,14 +688,52 @@ class UMAPDetector(MultiClassDetector):
         return self
     
     def fit_and_map(self, X_train, y_train_true):
-        """Fit UMAP and learn mapping correctly."""
-        self.fit(X_train)
+        """Fit UMAP and learn mapping correctly with proportional sampling."""
+        # --- Proportional downsampling for large datasets ---
+        if len(X_train) > 40000:
+            target_size = 20000
+            print(f"      ⚠️  Large dataset ({len(X_train)}). Proportional downsampling to {target_size} samples.")
+            
+            unique_classes, class_counts = np.unique(y_train_true, return_counts=True)
+            total_samples = len(X_train)
+            
+            sampled_indices = []
+            np.random.seed(42)
+            
+            for cls, count in zip(unique_classes, class_counts):
+                cls_target = int((count / total_samples) * target_size)
+                cls_target = max(min(10, count), cls_target)
+                
+                cls_indices = np.where(y_train_true == cls)[0]
+                
+                if len(cls_indices) <= cls_target:
+                    sampled_indices.extend(cls_indices)
+                else:
+                    sampled = np.random.choice(cls_indices, cls_target, replace=False)
+                    sampled_indices.extend(sampled)
+            
+            np.random.shuffle(sampled_indices)
+            sampled_indices = np.array(sampled_indices)
+            
+            X_train_sample = X_train[sampled_indices]
+            y_train_sample = y_train_true[sampled_indices]
+            
+            unique_sampled, sampled_counts = np.unique(y_train_sample, return_counts=True)
+            print(f"         Original distribution: {dict(zip(unique_classes, class_counts))}")
+            print(f"         Sampled distribution: {dict(zip(unique_sampled, sampled_counts))}")
+        else:
+            X_train_sample = X_train
+            y_train_sample = y_train_true
+        
+        # Fit model on sampled data
+        self.fit(X_train_sample)
 
-        # Correct: use true cluster labels from training embedding
+        # Get cluster labels from training embedding
         y_train_clusters = self.clustering_model.labels_
 
+        # Learn optimal mapping using SAMPLED data
         self.cluster_to_class_map_ = self._find_optimal_mapping(
-            y_train_true,
+            y_train_sample,  # Use sampled labels
             y_train_clusters
         )
         return self
@@ -810,6 +920,12 @@ class DatasetLoader:
             print(f"      ⚠️  No valid scenarios found for {device_name}")
             return None
         
+        for i, (df, scenario_name) in enumerate(zip(all_train_dfs, scenario_names)):
+            df['attack_scenario'] = scenario_name
+            
+        for i, (df, scenario_name) in enumerate(zip(all_test_dfs, scenario_names)):
+            df['attack_scenario'] = scenario_name
+
         # Concatenate all scenarios
         train_combined = pd.concat(all_train_dfs, ignore_index=True).drop_duplicates()
         test_combined = pd.concat(all_test_dfs, ignore_index=True)
@@ -818,7 +934,7 @@ class DatasetLoader:
         train_combined.replace([np.inf, -np.inf], np.nan, inplace=True)
         test_combined.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-        initial_features = [col for col in train_combined.columns if col not in ['attack', 'attack_numeric']]
+        initial_features = [col for col in train_combined.columns if col not in ['attack', 'attack_numeric', 'attack_scenario']]
         
         # Find columns that have NaNs in EITHER Train or Test
         train_nans = train_combined[initial_features].columns[train_combined[initial_features].isna().any()].tolist()
@@ -847,26 +963,22 @@ class DatasetLoader:
         print(f"      ✓ Attack types: {n_clusters} clusters")
         print(f"         Mapping: {attack_mapping}")
         
-        # Convert attack labels to numeric
-        def map_attack_label(row_attack_val):
-            if pd.isna(row_attack_val):
+        # **FIX: Use scenario_source to assign correct multi-class labels**
+        def map_attack_label(row):
+            # If attack column is 0 or 'Normal', it's Normal
+            if pd.isna(row['attack']) or str(row['attack']).strip() in ['0', 'Normal', 'normal']:
                 return 0
-            val_str = str(row_attack_val).strip()
-            if val_str.lower() == 'normal' or val_str == '0':
-                return 0
-            # Try to match with scenario names
-            for scenario_name, label in attack_mapping.items():
-                if scenario_name in val_str or val_str in scenario_name:
-                    return label
-            # If no match, check if it's already numeric
-            try:
-                return int(val_str)
-            except:
-                return 0  # Default to Normal if can't parse
+            # If attack column is 1, use the scenario source
+            else:
+                scenario = row['attack_scenario']
+                return attack_mapping.get(scenario, 0)
         
-        train_combined['attack_numeric'] = train_combined['attack'].apply(map_attack_label)
-        test_combined['attack_numeric'] = test_combined['attack'].apply(map_attack_label)
-        
+        train_combined['attack_numeric'] = train_combined.apply(map_attack_label, axis=1)
+        test_combined['attack_numeric'] = test_combined.apply(map_attack_label, axis=1)
+
+        # Drop the temporary scenario_source column
+        train_combined = train_combined.drop('attack_scenario', axis=1)
+        test_combined = test_combined.drop('attack_scenario', axis=1)
         
         X_train = train_combined[valid_features].values
         y_train = train_combined['attack_numeric'].values
@@ -1031,7 +1143,7 @@ class ExperimentRunner:
             
             # Run experiment
             summary, per_class = self.run_single_experiment(
-                model, X_train, y_train, X_test, y_test, seed, attack_mapping
+                model, X_train, y_train, X_test, y_test, seed
             )
             
             if summary is None:
@@ -1256,7 +1368,7 @@ def main():
                 device_class_details[model_name] = class_details
             
             # Save Level 2 results
-            aggregator.save_level2_results(protocol_name, device_name, device_class_details)
+            aggregator.save_level2_results(protocol_name, device_name, device_summaries, device_class_details)
         
         # Aggregate to Level 1
         aggregator.aggregate_level1(protocol_name)
