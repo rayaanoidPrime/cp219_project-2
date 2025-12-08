@@ -80,6 +80,21 @@ def discover_datasets(base_dir: Path):
 # PLOTTING FUNCTIONS
 # ============================================================================
 
+def extract_attack_type(scenario_name):
+    """Extract attack type from scenario name."""
+    attack_keywords = {
+        'replay': 'Replay', 'poisioning': 'Poisoning', 'poisoning': 'Poisoning',
+        'masquerade': 'Masquerade', 'injection': 'Injection', 
+        'spoofing': 'Spoofing', 'DoS': 'DoS', 'dos': 'DoS',
+        'insertion': 'Insertion', 'flood': 'Flood', 
+        'supression': 'Suppression', 'suppression': 'Suppression',
+        'FIDA': 'FIDA', 'fida': 'FIDA'
+    }
+    for key, attack_type in attack_keywords.items():
+        if key.lower() in scenario_name.lower():
+            return attack_type
+    return 'Attack'
+
 def plot_feature_distribution(df, feature, dataset_name, output_path):
     """
     Plot histogram with KDE for a single feature, comparing Normal vs Attack.
@@ -93,7 +108,7 @@ def plot_feature_distribution(df, feature, dataset_name, output_path):
     attack_data = df[df['attack'] == 1][feature].dropna()
     
     # Skip if insufficient data
-    if len(normal_data) < 5 or len(attack_data) < 5:
+    if len(normal_data) < 5 or len(attack_data) < 1:
         plt.close()
         return False
     
@@ -126,10 +141,16 @@ def plot_feature_distribution(df, feature, dataset_name, output_path):
     except Exception:
         pass  # KDE may fail for certain distributions
     
+    # Extract simplified title: Dataset Name + Attack Type + Feature
+    parts = dataset_name.split('/')
+    dataset_source = parts[0] if parts else dataset_name
+    scenario = parts[-1] if parts else ''
+    attack_type = extract_attack_type(scenario)
+    
     # Styling
     ax.set_xlabel(feature, fontsize=Config.LABEL_FONTSIZE, fontweight='bold')
     ax.set_ylabel('Density', fontsize=Config.LABEL_FONTSIZE, fontweight='bold')
-    ax.set_title(f'{feature}: Normal vs Attack\n{dataset_name}', 
+    ax.set_title(f'{dataset_source} - {attack_type}\n{feature}: Normal vs Attack', 
                  fontsize=Config.TITLE_FONTSIZE, fontweight='bold')
     ax.tick_params(axis='both', labelsize=Config.TICK_FONTSIZE)
     ax.legend(fontsize=Config.LEGEND_FONTSIZE, loc='upper right')
@@ -172,7 +193,7 @@ def plot_dataset_grid(df, features, dataset_name, output_path):
         normal_feat = normal_data[feature].dropna()
         attack_feat = attack_data[feature].dropna()
         
-        if len(normal_feat) < 5 or len(attack_feat) < 5:
+        if len(normal_feat) < 5 or len(attack_feat) < 1:
             ax.text(0.5, 0.5, 'Insufficient data', ha='center', va='center', transform=ax.transAxes)
             ax.set_title(feature, fontsize=10, fontweight='bold')
             continue

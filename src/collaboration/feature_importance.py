@@ -21,6 +21,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 
+# Set up Computer Modern font (IEEE/LaTeX style)
+plt.rcParams.update({
+    'font.family': 'serif',
+    'font.serif': ['Computer Modern Roman', 'CMU Serif', 'Times New Roman'],
+    'mathtext.fontset': 'cm',
+    'axes.unicode_minus': False,
+})
+
 # Configuration
 class Config:
     BASE_DIR = r"C:\Users\sengu\Documents\cp219_project-2\data\Final_Datasets\Final_Datasets\preprocessed_new\preprocessed_new"
@@ -39,6 +47,7 @@ class Config:
         'learning_rate': 0.1,
         'n_estimators': 100,
         'objective': 'binary:logistic',
+        'base_score': 0.5,
         'random_state': RANDOM_STATE,
         'n_jobs': -1,
         'verbosity': 0
@@ -52,14 +61,11 @@ class Config:
     }
     
     # PCA parameters
-    PCA_VARIANCE_THRESHOLD = 0.95  # Retain 95% of variance
+    PCA_VARIANCE_THRESHOLD = 0.95
 
 # Create output directories
 os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
-os.makedirs(f"{Config.OUTPUT_DIR}/dataset_rankings", exist_ok=True)
 os.makedirs(f"{Config.OUTPUT_DIR}/visualizations", exist_ok=True)
-os.makedirs(f"{Config.OUTPUT_DIR}/visualizations/per_dataset", exist_ok=True)
-os.makedirs(f"{Config.OUTPUT_DIR}/checkpoints", exist_ok=True)
 
 # ============================================================================
 # PHASE 1: DATA DISCOVERY
@@ -136,6 +142,20 @@ def load_and_prepare_data(train_path, test_path, target_col):
         X_test = test_df.drop(columns=[target_col]) if target_col in test_df.columns else test_df
         y_test = test_df[target_col] if target_col in test_df.columns else None
         
+        # Exclude 'index' column from features (not meaningful for classification)
+        if 'index' in X_train.columns:
+            print(f"  🔧 Excluding 'index' column from features")
+            X_train = X_train.drop(columns=['index'])
+            if 'index' in X_test.columns:
+                X_test = X_test.drop(columns=['index'])
+        
+        # Exclude 'freq' column from features (not using it in our models)
+        if 'freq' in X_train.columns:
+            print(f"  🔧 Excluding 'freq' column from features")
+            X_train = X_train.drop(columns=['freq'])
+            if 'freq' in X_test.columns:
+                X_test = X_test.drop(columns=['freq'])
+        
         # Store original feature names
         original_features = X_train.columns.tolist()
         
@@ -170,7 +190,9 @@ def calculate_xgboost_shap(X_train, X_test, y_train):
     try:
         print("  🔧 Training XGBoost model...")
         model = xgb.XGBClassifier(**Config.XGB_PARAMS)
-        model.fit(X_train, y_train)
+        # Ensure labels are binary (0/1) for logistic objective
+        y_binary = (y_train != 0).astype(int)
+        model.fit(X_train, y_binary)
         
         print("  🔧 Calculating SHAP values...")
         explainer = shap.TreeExplainer(model)
@@ -249,43 +271,6 @@ def normalize_scores(scores_dict):
     
     return {k: (v - min_val) / (max_val - min_val) for k, v in scores_dict.items()}
 
-def save_dataset_ranking(result, output_dir):
-    """Save individual dataset ranking to CSV."""
-    try:
-        dataset_name = result['dataset_name']
-        safe_name = dataset_name.replace('/', '_').replace('\\', '_')
-        
-        # Create ranking dataframe
-        ranking_data = []
-        
-        for feature in result['features']:
-            row = {'feature': feature}
-            
-            if 'xgb_shap_scores' in result:
-                row['xgb_shap_score'] = result['xgb_shap_scores'].get(feature, 0)
-            if 'rf_scores' in result:
-                row['rf_score'] = result['rf_scores'].get(feature, 0)
-            if 'pca_scores' in result:
-                row['pca_score'] = result['pca_scores'].get(feature, 0)
-            if 'combined_scores' in result:
-                row['combined_score'] = result['combined_scores'].get(feature, 0)
-            
-            ranking_data.append(row)
-        
-        ranking_df = pd.DataFrame(ranking_data)
-        ranking_df = ranking_df.sort_values('combined_score', ascending=False)
-        
-        # Save to CSV
-        output_path = f"{output_dir}/dataset_rankings/{safe_name}.csv"
-        ranking_df.to_csv(output_path, index=False)
-        print(f"  💾 Saved ranking to: {safe_name}.csv")
-        
-        return ranking_df
-    
-    except Exception as e:
-        print(f"  ❌ Error saving ranking: {str(e)}")
-        return None
-
 def process_single_dataset(dataset_info, output_dir):
     """Process a single dataset and calculate all importance scores."""
     name = dataset_info['name']
@@ -360,33 +345,19 @@ def process_single_dataset(dataset_info, output_dir):
     # Store data for visualization
     results['X_train'] = X_train
     
-    # Save individual dataset ranking
-    save_dataset_ranking(results, output_dir)
-    
     return results
 
 # ============================================================================
-# PHASE 3: PROCESS ALL DATASETS WITH CHECKPOINTING
+# PHASE 3: PROCESS ALL DATASETS 
 # ============================================================================
 
 print("\n" + "="*80)
 print("🚀 Phase 2: Processing all datasets...")
 print("="*80)
 
-# Check for existing checkpoint
-checkpoint_file = f"{Config.OUTPUT_DIR}/checkpoints/progress.pkl"
-if os.path.exists(checkpoint_file):
-    print("📂 Found existing checkpoint, loading...")
-    with open(checkpoint_file, 'rb') as f:
-        checkpoint = pickle.load(f)
-        all_results = checkpoint['results']
-        failed_datasets = checkpoint['failed']
-        processed_indices = checkpoint['processed_indices']
-    print(f"✓ Loaded {len(all_results)} previously processed datasets")
-else:
-    all_results = []
-    failed_datasets = []
-    processed_indices = set()
+all_results = []
+failed_datasets = []
+processed_indices = set()
 
 error_log = []
 
@@ -418,26 +389,6 @@ for idx, dataset_info in enumerate(tqdm(datasets, desc="Processing datasets")):
             'traceback': error_trace,
             'index': idx
         })
-    
-    # Save checkpoint every 5 datasets
-    if (idx + 1) % 5 == 0:
-        checkpoint = {
-            'results': all_results,
-            'failed': failed_datasets,
-            'processed_indices': processed_indices
-        }
-        with open(checkpoint_file, 'wb') as f:
-            pickle.dump(checkpoint, f)
-        print(f"\n💾 Checkpoint saved ({len(all_results)}/{len(datasets)} completed)")
-
-# Final checkpoint save
-checkpoint = {
-    'results': all_results,
-    'failed': failed_datasets,
-    'processed_indices': processed_indices
-}
-with open(checkpoint_file, 'wb') as f:
-    pickle.dump(checkpoint, f)
 
 # Save error log
 if error_log:
@@ -513,47 +464,17 @@ colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(top_features)))
 plt.barh(range(len(top_features)), top_features['avg_combined_importance'], color=colors)
 plt.yticks(range(len(top_features)), top_features['feature'], fontsize=26)
 plt.xticks(fontsize=20)
-plt.xlabel('Average Combined Importance Score', fontsize=24, fontweight='bold')
-plt.ylabel('Feature Name', fontsize=20, fontweight='bold')
-plt.title(f'Top {Config.TOP_K_FEATURES} Features Globally\n(XGBoost+SHAP + Random Forest + PCA)', fontsize=22, fontweight='bold')
+plt.xlabel('Average Combined Importance Score', fontsize=24)
+plt.ylabel('Feature Name', fontsize=22)
+plt.title(f'Top {Config.TOP_K_FEATURES} Features Globally\n(XGBoost+SHAP + Random Forest + PCA)', fontsize=22)
 plt.gca().invert_yaxis()
 plt.grid(axis='x', alpha=0.3)
 plt.tight_layout()
-plt.savefig(f"{Config.OUTPUT_DIR}/visualizations/global_top{Config.TOP_K_FEATURES}.png", dpi=330, bbox_inches='tight')
+plt.savefig(f"{Config.OUTPUT_DIR}/global_top{Config.TOP_K_FEATURES}.png", dpi=330, bbox_inches='tight')
 plt.close()
 print("✓ Global ranking visualization saved")
 
-# 2. Per-dataset rankings (ALL DATASETS)
-print(f"Creating visualizations for all {len(all_results)} datasets...")
-for result in tqdm(all_results, desc="Creating per-dataset visualizations"):
-    if 'combined_scores' not in result:
-        continue
-    
-    dataset_name = result['dataset_name']
-    safe_name = dataset_name.replace('/', '_').replace('\\', '_')
-    
-    scores_df = pd.DataFrame([
-        {'feature': k, 'score': v} 
-        for k, v in result['combined_scores'].items()
-    ]).sort_values('score', ascending=False).head(Config.TOP_K_FEATURES)
-    
-    plt.figure(figsize=(12, 7))
-    colors = plt.cm.plasma(np.linspace(0.3, 0.9, len(scores_df)))
-    plt.barh(range(len(scores_df)), scores_df['score'], color=colors)
-    plt.yticks(range(len(scores_df)), scores_df['feature'], fontsize=9)
-    plt.xlabel('Combined Importance Score', fontsize=11)
-    plt.title(f'Top {Config.TOP_K_FEATURES} Features: {dataset_name}\nCategory: {result["category"]}', 
-              fontsize=12, fontweight='bold')
-    plt.gca().invert_yaxis()
-    plt.grid(axis='x', alpha=0.3)
-    plt.tight_layout()
-    
-    plt.savefig(f"{Config.OUTPUT_DIR}/visualizations/per_dataset/{safe_name}.png", dpi=300, bbox_inches='tight')
-    plt.close()
-
 print(f"✓ Created {len(all_results)} per-dataset visualizations")
-
-
 
 # ============================================================================
 # FINAL SUMMARY
@@ -580,7 +501,6 @@ metadata = {
     'total_unique_features': len(global_ranking_df),
     'top_features': global_ranking_df.head(20).to_dict('records'),
     'categories': list(set(d['category'] for d in datasets)),
-    'category_stats': category_stats,
     'config': {
         'top_k_features': Config.TOP_K_FEATURES,
         'target_col': Config.TARGET_COL,
@@ -594,14 +514,8 @@ with open(f"{Config.OUTPUT_DIR}/metadata.json", 'w') as f:
 
 print(f"\n📁 Results saved to: {Config.OUTPUT_DIR}/")
 print(f"   ├── global_ranking.csv ({len(global_ranking_df)} features)")
-print(f"   ├── dataset_rankings/ ({len(all_results)} files)")
-print(f"   ├── visualizations/")
-print(f"   │   ├── global_top{Config.TOP_K_FEATURES}.png")
-print(f"   │   ├── method_comparison.png")
-print(f"   │   ├── category_analysis.png")
-print(f"   │   └── per_dataset/ ({len(all_results)} visualizations)")
+print(f"   ├── global_top{Config.TOP_K_FEATURES}.png")
 print(f"   ├── metadata.json")
-print(f"   └── checkpoints/progress.pkl")
 
 if error_log:
     print(f"\n⚠️  Check error_log.csv for details on {len(failed_datasets)} failed datasets")

@@ -13,3 +13,8 @@ wandb/
 
 *.png
 *.pkl
+
+results/**
+outputs/**
+*.zip
+

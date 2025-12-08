@@ -12,6 +12,7 @@ from collections import defaultdict
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans, AgglomerativeClustering
 from sklearn.mixture import GaussianMixture
+from sklearn.ensemble import IsolationForest
 from sklearn.metrics import (
     accuracy_score, classification_report, precision_score, recall_score, f1_score,
     adjusted_rand_score, normalized_mutual_info_score
@@ -23,10 +24,21 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
-# UMAP
-import umap
+# Import ResourceProfiler for resource tracking
+sys.path.insert(0, str(Path(__file__).parent.parent / 'SV_try' / 'utility'))
+try:
+    from resource_usage import ResourceProfiler
+    RESOURCE_PROFILER_AVAILABLE = True
+except ImportError:
+    RESOURCE_PROFILER_AVAILABLE = False
+    print("Warning: ResourceProfiler not available. Resource metrics will be disabled.")
 
 warnings.filterwarnings('ignore')
+
+
+# =============================================================================
+# BASE CLASSES FOR CLUSTERING-BASED DETECTORS
+# =============================================================================
 
 class MultiClassDetector:
     """
@@ -239,11 +251,6 @@ class MultiClassDetector:
     def get_memory_mb(self):
         """
         Estimate memory footprint more accurately.
-        
-        This accounts for:
-        - Model parameters (numpy arrays)
-        - Training data cache (for Hierarchical)
-        - Cluster assignments
         """
         total_bytes = 0
         
@@ -253,35 +260,27 @@ class MultiClassDetector:
         # 2. Model-specific memory (numpy arrays in sklearn models)
         try:
             if hasattr(self.model, 'cluster_centers_'):
-                # K-Means: cluster centers
                 total_bytes += self.model.cluster_centers_.nbytes
             
             if hasattr(self.model, 'labels_'):
-                # All clustering models: labels
                 total_bytes += self.model.labels_.nbytes
             
             if hasattr(self.model, 'means_'):
-                # GMM: means
                 total_bytes += self.model.means_.nbytes
             
             if hasattr(self.model, 'covariances_'):
-                # GMM: covariances
                 total_bytes += self.model.covariances_.nbytes
             
             if hasattr(self.model, 'weights_'):
-                # GMM: mixture weights
                 total_bytes += self.model.weights_.nbytes
             
             if hasattr(self.model, 'precisions_'):
-                # GMM: precisions
                 total_bytes += self.model.precisions_.nbytes
             
             if hasattr(self.model, 'precisions_cholesky_'):
-                # GMM: Cholesky decomposition
                 total_bytes += self.model.precisions_cholesky_.nbytes
             
         except Exception as e:
-            # If any attribute access fails, continue
             pass
         
         # 3. Cached training data (for Hierarchical Clustering)
@@ -294,69 +293,19 @@ class MultiClassDetector:
         # 4. Cluster-to-class mapping
         if self.cluster_to_class_map_ is not None:
             total_bytes += sys.getsizeof(self.cluster_to_class_map_)
-            # Add size of keys and values
             for k, v in self.cluster_to_class_map_.items():
                 total_bytes += sys.getsizeof(k) + sys.getsizeof(v)
         
-        # Convert to MB
         return total_bytes / (1024 * 1024)
     
-    def get_detailed_memory_info(self):
-        """
-        Get detailed breakdown of memory usage for debugging/analysis.
-        
-        Returns:
-            Dict with memory breakdown by component
-        """
-        memory_info = {
-            'total_mb': 0,
-            'model_base_mb': 0,
-            'cluster_centers_mb': 0,
-            'training_cache_mb': 0,
-            'labels_mb': 0,
-            'mapping_mb': 0,
-            'gmm_params_mb': 0
-        }
-        
-        # Model base
-        memory_info['model_base_mb'] = sys.getsizeof(self.model) / (1024 * 1024)
-        
-        # Cluster centers (K-Means)
-        if hasattr(self.model, 'cluster_centers_'):
-            memory_info['cluster_centers_mb'] = self.model.cluster_centers_.nbytes / (1024 * 1024)
-        
-        # Labels
-        if hasattr(self.model, 'labels_'):
-            memory_info['labels_mb'] = self.model.labels_.nbytes / (1024 * 1024)
-        
-        # Training cache (Hierarchical)
-        if self.X_train_ is not None:
-            cache_bytes = self.X_train_.nbytes
-            if self.train_cluster_labels_ is not None:
-                cache_bytes += self.train_cluster_labels_.nbytes
-            memory_info['training_cache_mb'] = cache_bytes / (1024 * 1024)
-        
-        # GMM parameters
-        if hasattr(self.model, 'means_'):
-            gmm_bytes = self.model.means_.nbytes
-            if hasattr(self.model, 'covariances_'):
-                gmm_bytes += self.model.covariances_.nbytes
-            if hasattr(self.model, 'weights_'):
-                gmm_bytes += self.model.weights_.nbytes
-            memory_info['gmm_params_mb'] = gmm_bytes / (1024 * 1024)
-        
-        # Mapping
-        if self.cluster_to_class_map_ is not None:
-            map_bytes = sys.getsizeof(self.cluster_to_class_map_)
-            for k, v in self.cluster_to_class_map_.items():
-                map_bytes += sys.getsizeof(k) + sys.getsizeof(v)
-            memory_info['mapping_mb'] = map_bytes / (1024 * 1024)
-        
-        # Total
-        memory_info['total_mb'] = sum(v for k, v in memory_info.items() if k != 'total_mb')
-        
-        return memory_info
-        
+    def get_class_resources(self):
+        """Return per-class resource metrics (not applicable for clustering)."""
+        return None
+
+
+# =============================================================================
+# AUTOENCODER MODEL (PYTORCH)
+# =============================================================================
 
 class AutoencoderModel(nn.Module):
     """PyTorch Autoencoder for dimensionality reduction."""
@@ -410,71 +359,79 @@ class AutoencoderModel(nn.Module):
         return self.encoder(x)
 
 
-class AutoencoderDetector(MultiClassDetector):
-    """Autoencoder-based detector that clusters in latent space."""
+# =============================================================================
+# ONE-VS-ALL AUTOENCODER DETECTOR
+# =============================================================================
+
+class OneVsAllAutoencoderDetector:
+    """
+    One-vs-All Autoencoder anomaly detection for multi-class classification.
+    
+    Trains a separate autoencoder for each class. Each autoencoder learns to 
+    reconstruct samples from its class. During prediction, the class whose 
+    autoencoder produces the lowest reconstruction error is selected.
+    """
     
     def __init__(self, name: str, config: Dict):
-        super().__init__(name, None, config)
-        
-        self.autoencoder = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.clustering_model = None
-        
-        # Extract config
+        self.name = name
+        self.config = config
         self.ae_config = config.get('autoencoder', {})
-        self.n_clusters = 5
+        self.autoencoders = {}  # class_id -> trained autoencoder
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-    def fit(self, X):
-        """Train autoencoder, then cluster in latent space."""
-        start = time.time()
+        # Timing and resource metrics
+        self.train_time = 0
+        self.inference_time = 0
+        self.class_resources = {}  # class_id -> resource metrics dict
         
-        # Step 1: Train Autoencoder
-        print(f"      Training Autoencoder...")
-        input_dim = X.shape[1]
+    def _train_single_autoencoder(self, X_class, class_id, input_dim):
+        """Train a single autoencoder on data from one class."""
         
         # Build autoencoder
-        self.autoencoder = AutoencoderModel(
+        ae = AutoencoderModel(
             input_dim=input_dim,
-            encoder_layers=self.ae_config.get('architecture', {}).get('encoder_layers', [128, 64, 32]),
+            encoder_layers=self.ae_config.get('architecture', {}).get('encoder_layers', [64, 32]),
             latent_dim=self.ae_config.get('architecture', {}).get('latent_dim', 16),
-            decoder_layers=self.ae_config.get('architecture', {}).get('decoder_layers', [32, 64, 128]),
+            decoder_layers=self.ae_config.get('architecture', {}).get('decoder_layers', [32, 64]),
             activation=self.ae_config.get('activation', 'relu'),
             dropout=self.ae_config.get('dropout', 0.2)
         ).to(self.device)
         
         # Training parameters
         train_config = self.ae_config.get('training', {})
-        epochs = train_config.get('epochs', 100)
+        epochs = train_config.get('epochs', 50)
         batch_size = train_config.get('batch_size', 256)
         learning_rate = train_config.get('learning_rate', 0.001)
-        validation_split = train_config.get('validation_split', 0.2)
         patience = train_config.get('early_stopping_patience', 10)
         
         # Prepare data
-        X_tensor = torch.FloatTensor(X).to(self.device)
+        X_tensor = torch.FloatTensor(X_class).to(self.device)
         
-        # Train/validation split
-        n_train = int(len(X) * (1 - validation_split))
+        # Train/validation split (80/20)
+        n_train = int(len(X_class) * 0.8)
+        if n_train < 10:
+            n_train = len(X_class)  # Too small, use all for training
+        
         X_train_tensor = X_tensor[:n_train]
-        X_val_tensor = X_tensor[n_train:]
+        X_val_tensor = X_tensor[n_train:] if n_train < len(X_class) else X_tensor
         
         train_dataset = TensorDataset(X_train_tensor, X_train_tensor)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         
         # Optimizer and loss
-        optimizer = optim.Adam(self.autoencoder.parameters(), lr=learning_rate)
+        optimizer = optim.Adam(ae.parameters(), lr=learning_rate)
         criterion = nn.MSELoss()
         
         # Training loop
         best_val_loss = float('inf')
         patience_counter = 0
         
-        self.autoencoder.train()
+        ae.train()
         for epoch in range(epochs):
             train_loss = 0
             for batch_X, batch_y in train_loader:
                 optimizer.zero_grad()
-                output = self.autoencoder(batch_X)
+                output = ae(batch_X)
                 loss = criterion(output, batch_y)
                 loss.backward()
                 optimizer.step()
@@ -483,11 +440,11 @@ class AutoencoderDetector(MultiClassDetector):
             train_loss /= len(train_loader)
             
             # Validation
-            self.autoencoder.eval()
+            ae.eval()
             with torch.no_grad():
-                val_output = self.autoencoder(X_val_tensor)
+                val_output = ae(X_val_tensor)
                 val_loss = criterion(val_output, X_val_tensor).item()
-            self.autoencoder.train()
+            ae.train()
             
             # Early stopping
             if val_loss < best_val_loss:
@@ -496,288 +453,220 @@ class AutoencoderDetector(MultiClassDetector):
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
-                    print(f"        Early stopping at epoch {epoch+1}")
                     break
-            
-            if (epoch + 1) % 10 == 0:
-                print(f"        Epoch {epoch+1}/{epochs}: Train Loss={train_loss:.6f}, Val Loss={val_loss:.6f}")
         
-        # Step 2: Extract latent representations
-        print(f"      Extracting latent representations...")
-        self.autoencoder.eval()
-        with torch.no_grad():
-            X_latent = self.autoencoder.encode(X_tensor).cpu().numpy()
-        
-        # Check for NaNs/Infs that result from exploding gradients
-        if np.isnan(X_latent).any() or np.isinf(X_latent).any():
-            print("      ⚠️  Warning: Latent space contains NaNs/Infs. Cleaning...")
-            X_latent = np.nan_to_num(X_latent, nan=0.0, posinf=1e5, neginf=-1e5)
-
-        # Step 3: Cluster in latent space
-        print(f"      Clustering in latent space...")
-        from sklearn.cluster import KMeans
-        self.clustering_model = KMeans(
-            n_clusters=self.n_clusters,
-            random_state=42,
-            n_init=10,
-            max_iter=300
-        )
-        self.clustering_model.fit(X_latent)
-        
-        # Set self.model for parent class compatibility
-        self.model = self.clustering_model
-        
-        # Store for prediction
-        self.train_cluster_labels_ = self.clustering_model.labels_
-        
-        self.train_time = time.time() - start
-        print(f"      Total training time: {self.train_time:.2f}s")
-        
-        return self
+        ae.eval()
+        return ae
     
-    def fit_and_map(self, X_train, y_train_true):
-        """Override to handle latent space transformation with proportional sampling."""
-        # --- Proportional downsampling for large datasets ---
-        if len(X_train) > 40000:
-            target_size = 20000
-            print(f"      ⚠️  Large dataset ({len(X_train)}). Proportional downsampling to {target_size} samples.")
-            
-            unique_classes, class_counts = np.unique(y_train_true, return_counts=True)
-            total_samples = len(X_train)
-            
-            sampled_indices = []
-            np.random.seed(42)
-            
-            for cls, count in zip(unique_classes, class_counts):
-                cls_target = int((count / total_samples) * target_size)
-                cls_target = max(min(10, count), cls_target)
-                
-                cls_indices = np.where(y_train_true == cls)[0]
-                
-                if len(cls_indices) <= cls_target:
-                    sampled_indices.extend(cls_indices)
-                else:
-                    sampled = np.random.choice(cls_indices, cls_target, replace=False)
-                    sampled_indices.extend(sampled)
-            
-            np.random.shuffle(sampled_indices)
-            sampled_indices = np.array(sampled_indices)
-            
-            X_train_sample = X_train[sampled_indices]
-            y_train_sample = y_train_true[sampled_indices]
-            
-            unique_sampled, sampled_counts = np.unique(y_train_sample, return_counts=True)
-            print(f"         Original distribution: {dict(zip(unique_classes, class_counts))}")
-            print(f"         Sampled distribution: {dict(zip(unique_sampled, sampled_counts))}")
-        else:
-            X_train_sample = X_train
-            y_train_sample = y_train_true
-        
-        # Fit model on sampled data
-        self.fit(X_train_sample)
-        
-        # Get cluster predictions on training set (in latent space)
-        y_train_clusters = self.clustering_model.labels_
-        
-        # Learn optimal mapping using SAMPLED data
-        self.cluster_to_class_map_ = self._find_optimal_mapping(
-            y_train_sample,  # Use sampled labels
-            y_train_clusters
-        )
-        
-        return self
-    
-    def predict_clusters(self, X):
-        """Predict clusters for new data."""
-        start = time.time()
-        
-        # Step 1: Encode with autoencoder
-        self.autoencoder.eval()
+    def _compute_reconstruction_error(self, ae, X):
+        """Compute per-sample reconstruction error using trained autoencoder."""
+        ae.eval()
         with torch.no_grad():
             X_tensor = torch.FloatTensor(X).to(self.device)
-            X_latent = self.autoencoder.encode(X_tensor).cpu().numpy()
-        
-        if np.isnan(X_latent).any() or np.isinf(X_latent).any():
-            X_latent = np.nan_to_num(X_latent, nan=0.0, posinf=1e5, neginf=-1e5)
-
-        # Step 2: Predict clusters
-        clusters = self.clustering_model.predict(X_latent)
-        
-        self.inference_time = (time.time() - start) / len(X)
-        return clusters
+            reconstructed = ae(X_tensor)
+            # MSE per sample
+            errors = torch.mean((X_tensor - reconstructed) ** 2, dim=1).cpu().numpy()
+        return errors
     
-    def get_memory_mb(self):
-        """Estimate memory usage."""
-        total_bytes = 0
+    def fit_and_map(self, X_train, y_train_true):
+        """Train one autoencoder per class with resource tracking."""
+        start_total = time.time()
+        unique_classes = np.unique(y_train_true)
+        input_dim = X_train.shape[1]
         
-        # Autoencoder parameters
-        if self.autoencoder is not None:
-            for param in self.autoencoder.parameters():
-                total_bytes += param.data.nelement() * param.data.element_size()
+        print(f"      Training {len(unique_classes)} One-vs-All Autoencoders...")
         
-        # Clustering model
-        if self.clustering_model is not None:
-            total_bytes += sys.getsizeof(self.clustering_model)
-            if hasattr(self.clustering_model, 'cluster_centers_'):
-                total_bytes += self.clustering_model.cluster_centers_.nbytes
+        for class_id in unique_classes:
+            # Extract samples belonging to this class
+            class_mask = y_train_true == class_id
+            X_class = X_train[class_mask]
+            
+            print(f"        Class {class_id}: {len(X_class)} samples...", end=' ')
+            
+            # Train with resource profiling
+            if RESOURCE_PROFILER_AVAILABLE:
+                with ResourceProfiler() as profiler:
+                    ae = self._train_single_autoencoder(X_class, class_id, input_dim)
+                
+                self.class_resources[int(class_id)] = {
+                    'train_time_ns': profiler.wall_nanoseconds,
+                    'train_time_s': profiler.wall_seconds,
+                    'peak_ram_mb': profiler.peak_ram_mb,
+                    'cpu_avg_pct': profiler.cpu_avg_machine_pct,
+                    'cpu_peak_pct': profiler.cpu_peak_machine_pct
+                }
+            else:
+                start_class = time.time()
+                ae = self._train_single_autoencoder(X_class, class_id, input_dim)
+                elapsed = time.time() - start_class
+                
+                self.class_resources[int(class_id)] = {
+                    'train_time_ns': int(elapsed * 1e9),
+                    'train_time_s': elapsed,
+                    'peak_ram_mb': 0.0,
+                    'cpu_avg_pct': 0.0,
+                    'cpu_peak_pct': 0.0
+                }
+            
+            self.autoencoders[class_id] = ae
+            print(f"✓ ({self.class_resources[int(class_id)]['train_time_s']:.2f}s)")
         
-        # Labels
-        if self.train_cluster_labels_ is not None:
-            total_bytes += self.train_cluster_labels_.nbytes
-        
-        # Mapping
-        if self.cluster_to_class_map_ is not None:
-            total_bytes += sys.getsizeof(self.cluster_to_class_map_)
-            for k, v in self.cluster_to_class_map_.items():
-                total_bytes += sys.getsizeof(k) + sys.getsizeof(v)
-        
-        return total_bytes / (1024 * 1024)
-
-
-class UMAPDetector(MultiClassDetector):
-    """UMAP-based detector that clusters in UMAP projection space."""
-    
-    def __init__(self, name: str, config: Dict):
-        super().__init__(name, None, config)
-        
-        self.umap_model = None
-        self.clustering_model = None
-        
-        # Extract config
-        self.umap_config = config.get('umap', {})
-        self.n_clusters = 5
-        
-    def fit(self, X):
-        """Apply UMAP projection, then cluster."""
-        start = time.time()
-        
-        # Step 1: Apply UMAP
-        print(f"      Applying UMAP projection...")
-        self.umap_model = umap.UMAP(
-            n_components=self.umap_config.get('n_components', 10),  # Higher dim for clustering
-            n_neighbors=self.umap_config.get('n_neighbors', 15),
-            min_dist=self.umap_config.get('min_dist', 0.1),
-            metric=self.umap_config.get('metric', 'euclidean'),
-            random_state=self.umap_config.get('random_state', 42)
-        )
-        X_projected = self.umap_model.fit_transform(X)
-        print(f"        Projected to {X_projected.shape[1]} dimensions")
-        
-        # Step 2: Cluster in UMAP space
-        print(f"      Clustering in UMAP space...")
-        from sklearn.cluster import KMeans
-        self.clustering_model = KMeans(
-            n_clusters=self.n_clusters,
-            random_state=42,
-            n_init=10,
-            max_iter=300
-        )
-        self.clustering_model.fit(X_projected)
-        
-        # Set self.model for parent class compatibility
-        self.model = self.clustering_model
-        
-        # Store for prediction
-        self.train_cluster_labels_ = self.clustering_model.labels_
-        
-        self.train_time = time.time() - start
+        self.train_time = time.time() - start_total
         print(f"      Total training time: {self.train_time:.2f}s")
         
         return self
     
-    def fit_and_map(self, X_train, y_train_true):
-        """Fit UMAP and learn mapping correctly with proportional sampling."""
-        # --- Proportional downsampling for large datasets ---
-        if len(X_train) > 40000:
-            target_size = 20000
-            print(f"      ⚠️  Large dataset ({len(X_train)}). Proportional downsampling to {target_size} samples.")
-            
-            unique_classes, class_counts = np.unique(y_train_true, return_counts=True)
-            total_samples = len(X_train)
-            
-            sampled_indices = []
-            np.random.seed(42)
-            
-            for cls, count in zip(unique_classes, class_counts):
-                cls_target = int((count / total_samples) * target_size)
-                cls_target = max(min(10, count), cls_target)
-                
-                cls_indices = np.where(y_train_true == cls)[0]
-                
-                if len(cls_indices) <= cls_target:
-                    sampled_indices.extend(cls_indices)
-                else:
-                    sampled = np.random.choice(cls_indices, cls_target, replace=False)
-                    sampled_indices.extend(sampled)
-            
-            np.random.shuffle(sampled_indices)
-            sampled_indices = np.array(sampled_indices)
-            
-            X_train_sample = X_train[sampled_indices]
-            y_train_sample = y_train_true[sampled_indices]
-            
-            unique_sampled, sampled_counts = np.unique(y_train_sample, return_counts=True)
-            print(f"         Original distribution: {dict(zip(unique_classes, class_counts))}")
-            print(f"         Sampled distribution: {dict(zip(unique_sampled, sampled_counts))}")
-        else:
-            X_train_sample = X_train
-            y_train_sample = y_train_true
-        
-        # Fit model on sampled data
-        self.fit(X_train_sample)
-
-        # Get cluster labels from training embedding
-        y_train_clusters = self.clustering_model.labels_
-
-        # Learn optimal mapping using SAMPLED data
-        self.cluster_to_class_map_ = self._find_optimal_mapping(
-            y_train_sample,  # Use sampled labels
-            y_train_clusters
-        )
-        return self
-    
-    def predict_clusters(self, X):
-        """Predict clusters for new data."""
+    def predict(self, X):
+        """Predict class by finding which autoencoder gives lowest reconstruction error."""
         start = time.time()
         
-        # Step 1: Project with UMAP
-        X_projected = self.umap_model.transform(X)
+        # Compute reconstruction errors for all classes
+        all_errors = {}
+        for class_id, ae in self.autoencoders.items():
+            all_errors[class_id] = self._compute_reconstruction_error(ae, X)
         
-        # Step 2: Predict clusters
-        clusters = self.clustering_model.predict(X_projected)
+        # For each sample, pick class with lowest reconstruction error
+        predictions = np.zeros(len(X), dtype=int)
+        for i in range(len(X)):
+            sample_errors = {cid: all_errors[cid][i] for cid in all_errors}
+            predictions[i] = min(sample_errors, key=sample_errors.get)
         
         self.inference_time = (time.time() - start) / len(X)
-        return clusters
+        return predictions
     
     def get_memory_mb(self):
-        """Estimate memory usage."""
+        """Estimate memory usage of all autoencoders."""
         total_bytes = 0
-        
-        # UMAP model
-        if self.umap_model is not None:
-            total_bytes += sys.getsizeof(self.umap_model)
-            # UMAP stores embedding
-            if hasattr(self.umap_model, 'embedding_'):
-                total_bytes += self.umap_model.embedding_.nbytes
-        
-        # Clustering model
-        if self.clustering_model is not None:
-            total_bytes += sys.getsizeof(self.clustering_model)
-            if hasattr(self.clustering_model, 'cluster_centers_'):
-                total_bytes += self.clustering_model.cluster_centers_.nbytes
-        
-        # Labels
-        if self.train_cluster_labels_ is not None:
-            total_bytes += self.train_cluster_labels_.nbytes
-        
-        # Mapping
-        if self.cluster_to_class_map_ is not None:
-            total_bytes += sys.getsizeof(self.cluster_to_class_map_)
-            for k, v in self.cluster_to_class_map_.items():
-                total_bytes += sys.getsizeof(k) + sys.getsizeof(v)
-        
+        for class_id, ae in self.autoencoders.items():
+            for param in ae.parameters():
+                total_bytes += param.data.nelement() * param.data.element_size()
         return total_bytes / (1024 * 1024)
+    
+    def get_class_resources(self):
+        """Return per-class resource metrics."""
+        return self.class_resources
 
+
+# =============================================================================
+# ONE-VS-ALL ISOLATION FOREST DETECTOR
+# =============================================================================
+
+class OneVsAllIsolationForestDetector:
+    """
+    One-vs-All Isolation Forest for multi-class classification.
+    
+    Trains a separate Isolation Forest for each class. Each forest learns the 
+    "normal" distribution of its class. During prediction, the class whose 
+    forest gives the highest score (least anomalous) is selected.
+    """
+    
+    def __init__(self, name: str, config: Dict):
+        self.name = name
+        self.config = config
+        self.forests = {}  # class_id -> trained IsolationForest
+        
+        # Timing and resource metrics
+        self.train_time = 0
+        self.inference_time = 0
+        self.class_resources = {}  # class_id -> resource metrics dict
+        
+    def fit_and_map(self, X_train, y_train_true):
+        """Train one Isolation Forest per class with resource tracking."""
+        start_total = time.time()
+        unique_classes = np.unique(y_train_true)
+        
+        print(f"      Training {len(unique_classes)} One-vs-All Isolation Forests...")
+        
+        for class_id in unique_classes:
+            # Extract samples belonging to this class
+            class_mask = y_train_true == class_id
+            X_class = X_train[class_mask]
+            
+            print(f"        Class {class_id}: {len(X_class)} samples...", end=' ')
+            
+            # Train with resource profiling
+            if RESOURCE_PROFILER_AVAILABLE:
+                with ResourceProfiler() as profiler:
+                    forest = IsolationForest(
+                        n_estimators=self.config.get('n_estimators', 100),
+                        contamination='auto',
+                        random_state=42,
+                        n_jobs=-1
+                    )
+                    forest.fit(X_class)
+                
+                self.class_resources[int(class_id)] = {
+                    'train_time_ns': profiler.wall_nanoseconds,
+                    'train_time_s': profiler.wall_seconds,
+                    'peak_ram_mb': profiler.peak_ram_mb,
+                    'cpu_avg_pct': profiler.cpu_avg_machine_pct,
+                    'cpu_peak_pct': profiler.cpu_peak_machine_pct
+                }
+            else:
+                start_class = time.time()
+                forest = IsolationForest(
+                    n_estimators=self.config.get('n_estimators', 100),
+                    contamination='auto',
+                    random_state=42,
+                    n_jobs=-1
+                )
+                forest.fit(X_class)
+                elapsed = time.time() - start_class
+                
+                self.class_resources[int(class_id)] = {
+                    'train_time_ns': int(elapsed * 1e9),
+                    'train_time_s': elapsed,
+                    'peak_ram_mb': 0.0,
+                    'cpu_avg_pct': 0.0,
+                    'cpu_peak_pct': 0.0
+                }
+            
+            self.forests[class_id] = forest
+            print(f"✓ ({self.class_resources[int(class_id)]['train_time_s']:.2f}s)")
+        
+        self.train_time = time.time() - start_total
+        print(f"      Total training time: {self.train_time:.2f}s")
+        
+        return self
+    
+    def predict(self, X):
+        """Predict class by finding which forest gives highest score (least anomalous)."""
+        start = time.time()
+        
+        # Compute anomaly scores for all classes
+        # score_samples returns: higher = more normal (less anomalous)
+        all_scores = {}
+        for class_id, forest in self.forests.items():
+            all_scores[class_id] = forest.score_samples(X)
+        
+        # For each sample, pick class with highest score (most normal)
+        predictions = np.zeros(len(X), dtype=int)
+        for i in range(len(X)):
+            sample_scores = {cid: all_scores[cid][i] for cid in all_scores}
+            predictions[i] = max(sample_scores, key=sample_scores.get)
+        
+        self.inference_time = (time.time() - start) / len(X)
+        return predictions
+    
+    def get_memory_mb(self):
+        """Estimate memory usage of all forests."""
+        total_bytes = 0
+        for class_id, forest in self.forests.items():
+            total_bytes += sys.getsizeof(forest)
+            # Estimate tree memory (rough approximation)
+            if hasattr(forest, 'estimators_'):
+                for tree in forest.estimators_:
+                    total_bytes += sys.getsizeof(tree)
+        return total_bytes / (1024 * 1024)
+    
+    def get_class_resources(self):
+        """Return per-class resource metrics."""
+        return self.class_resources
+
+
+# =============================================================================
+# DATA LOADING
+# =============================================================================
 
 class DatasetLoader:
     """Handles loading and aggregating datasets from directory structure."""
@@ -873,12 +762,23 @@ class DatasetLoader:
         reference_columns = None
 
         IMP_FEATURES = [
-            'integer_7', 'integer_5', 'integer_8', 'integer_6',
-            'timestamp_diff', 'stNum', 'time_diff',
-            'floatvalue_3', 'floatvalue_1', 'freq',
-            'Length', 'index', 'floatvalue_2',
-            'stNum_diff', 'sqNum_diff'
+            'integer_7',
+            'integer_8',
+            'time_diff',
+            'timestamp_diff',
+            'integer_6',
+            'stNum',
+            'integer_5',
+            'Length',
+            'sqNum_diff',
+            'sqNum',
+            'floatvalue_3',
+            'integer_3',
+            'floatvalue_1',
+            'stNum_diff',
+            'time_from_start'
         ]
+
         
         # Load all scenarios
         for scenario in scenarios:
@@ -972,7 +872,7 @@ class DatasetLoader:
         print(f"      ✓ Attack types: {n_clusters} clusters")
         print(f"         Mapping: {attack_mapping}")
         
-        # **FIX: Use scenario_source to assign correct multi-class labels**
+        # Use scenario_source to assign correct multi-class labels
         def map_attack_label(row):
             # If attack column is 0 or 'Normal', it's Normal
             if pd.isna(row['attack']) or str(row['attack']).strip() in ['0', 'Normal', 'normal']:
@@ -1001,6 +901,10 @@ class DatasetLoader:
         
         return X_train, y_train, X_test, y_test, n_clusters, attack_mapping
 
+
+# =============================================================================
+# EXPERIMENT RUNNER
+# =============================================================================
 
 class ExperimentRunner:
     """Runs experiments with multiple models and random seeds."""
@@ -1034,45 +938,36 @@ class ExperimentRunner:
             config={'n_clusters': n_clusters}
         )
         
-        # 4. Autoencoder + K-Means
+        # 4. One-vs-All Autoencoder
         ae_config = {
             'autoencoder': {
                 'architecture': {
-                    'encoder_layers': [128, 64, 32],
+                    'encoder_layers': [64, 32],
                     'latent_dim': 16,
-                    'decoder_layers': [32, 64, 128]
+                    'decoder_layers': [32, 64]
                 },
                 'activation': 'relu',
                 'dropout': 0.2,
                 'training': {
-                    'epochs': 100,
+                    'epochs': 50,
                     'batch_size': 256,
                     'learning_rate': 0.001,
-                    'validation_split': 0.2,
                     'early_stopping_patience': 10
                 }
-            },
-            'n_clusters': n_clusters
+            }
         }
-        models['Autoencoder'] = lambda: AutoencoderDetector(
-            name='Autoencoder',
+        models['OVA-Autoencoder'] = lambda: OneVsAllAutoencoderDetector(
+            name='OVA-Autoencoder',
             config=ae_config
         )
         
-        # 5. UMAP + K-Means
-        umap_config = {
-            'umap': {
-                'n_components': 10,
-                'n_neighbors': 15,
-                'min_dist': 0.1,
-                'metric': 'euclidean',
-                'random_state': 42
-            },
-            'n_clusters': n_clusters
+        # 5. One-vs-All Isolation Forest
+        if_config = {
+            'n_estimators': 100
         }
-        models['UMAP'] = lambda: UMAPDetector(
-            name='UMAP',
-            config=umap_config
+        models['OVA-IsolationForest'] = lambda: OneVsAllIsolationForestDetector(
+            name='OVA-IsolationForest',
+            config=if_config
         )
         
         return models
@@ -1100,8 +995,7 @@ class ExperimentRunner:
             y_pred = model.predict(X_test_scaled)
             inference_time = (time.time() - start_time) / len(X_test)
             
-             # --- NEW: Generate detailed Classification Report ---
-            # output_dict=True gives us a nested dictionary
+            # Generate detailed Classification Report
             clf_report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
             
             # Base Metrics
@@ -1116,50 +1010,59 @@ class ExperimentRunner:
                 'macro_recall': clf_report['macro avg']['recall'],
                 'macro_f1': clf_report['macro avg']['f1-score'],
                 
-                # Weighted Averages (Requested)
+                # Weighted Averages
                 'weighted_precision': clf_report['weighted avg']['precision'],
                 'weighted_recall': clf_report['weighted avg']['recall'],
                 'weighted_f1': clf_report['weighted avg']['f1-score']
             }
             
             # Extract Per-Class Metrics
-            # Keys in clf_report are strings '0', '1', etc., plus 'macro avg', 'weighted avg', 'accuracy'
             per_class_metrics = {}
             for cls_label, scores in clf_report.items():
                 if cls_label not in ['accuracy', 'macro avg', 'weighted avg']:
                     per_class_metrics[cls_label] = scores
             
-            return metrics, per_class_metrics
+            # Get per-class resource metrics if available
+            class_resources = model.get_class_resources()
+            
+            return metrics, per_class_metrics, class_resources
             
         except Exception as e:
             print(f"        ❌ Error in experiment: {str(e)}")
-            return None
+            import traceback
+            traceback.print_exc()
+            return None, None, None
     
     def run_multiple_runs(self, model_name: str, model_factory, X_train, y_train, 
-                         X_test, y_test, n_clusters: int,attack_mapping: Dict) -> Optional[Dict]:
+                         X_test, y_test, n_clusters: int, attack_mapping: Dict) -> Optional[Dict]:
         """Run 3 times, average summaries, and collect per-class data."""
         print(f"      🔬 Training {model_name}...")
         
         summary_metrics_list = []
-        class_metrics_list = [] # List of dicts
+        class_metrics_list = []  # List of dicts
+        class_resources_list = []  # List of resource dicts
 
         for run_idx, seed in enumerate(self.random_seeds, start=1):
             print(f"        Run {run_idx}/3 (seed={seed})...", end=' ')
             
             # Create fresh model instance
             model = model_factory()
-            model.n_clusters = n_clusters
+            if hasattr(model, 'n_clusters'):
+                model.n_clusters = n_clusters
             
             # Run experiment
-            summary, per_class = self.run_single_experiment(
+            summary, per_class, class_resources = self.run_single_experiment(
                 model, X_train, y_train, X_test, y_test, seed
             )
             
             if summary is None:
+                print("❌ Failed")
                 continue
             
             summary_metrics_list.append(summary)
             class_metrics_list.append(per_class)
+            if class_resources:
+                class_resources_list.append(class_resources)
             
             print(f"✓ Acc={summary['accuracy']:.4f}, Macro F1={summary['macro_f1']:.4f}")
         
@@ -1173,13 +1076,9 @@ class ExperimentRunner:
             avg_summary[f'{key}_std'] = np.std([m[key] for m in summary_metrics_list])
             
         # 2. Average Per-Class Metrics
-        # This is tricky because we have a list of dicts. 
-        # Structure: [{'0': {'prec': 0.9}, '1':...}, {'0': {'prec': 0.8}, ...}]
-        
         avg_class_metrics = []
         
         # Get all class IDs present in the report (as strings)
-        # We assume all runs return the same set of classes present in y_test
         class_ids = class_metrics_list[0].keys()
         
         # Reverse mapping for naming: {0: 'Normal', 1: 'Dos'}
@@ -1198,17 +1097,30 @@ class ExperimentRunner:
             f1s = [run[cid]['f1-score'] for run in class_metrics_list]
             supports = [run[cid]['support'] for run in class_metrics_list]
             
-            avg_class_metrics.append({
+            class_row = {
                 'class_id': int(cid),
                 'class_name': c_name,
                 'precision': np.mean(precisions),
                 'recall': np.mean(recalls),
                 'f1_score': np.mean(f1s),
-                'support': np.mean(supports) # Should be constant across seeds for same test set
-            })
+                'support': np.mean(supports)
+            }
+            
+            # Add resource metrics if available (average across runs)
+            if class_resources_list and int(cid) in class_resources_list[0]:
+                resource_keys = ['train_time_ns', 'train_time_s', 'peak_ram_mb', 'cpu_avg_pct', 'cpu_peak_pct']
+                for rkey in resource_keys:
+                    vals = [r.get(int(cid), {}).get(rkey, 0) for r in class_resources_list]
+                    class_row[rkey] = np.mean(vals) if vals else 0
+            
+            avg_class_metrics.append(class_row)
             
         return avg_summary, avg_class_metrics
 
+
+# =============================================================================
+# RESULTS AGGREGATION
+# =============================================================================
 
 class ResultsAggregator:
     """Aggregates and saves results at different levels."""
@@ -1260,10 +1172,14 @@ class ResultsAggregator:
         
         if device_class_rows:
             df_class = pd.DataFrame(device_class_rows)
-            # Reorder columns for readability
-            cols = ['dataset', 'device', 'model', 'class_name', 'class_id', 
-                    'precision', 'recall', 'f1_score', 'support']
-            df_class = df_class[cols]
+            # Reorder columns for readability (include resource columns if present)
+            base_cols = ['dataset', 'device', 'model', 'class_name', 'class_id', 
+                        'precision', 'recall', 'f1_score', 'support']
+            resource_cols = ['train_time_s', 'train_time_ns', 'peak_ram_mb', 'cpu_avg_pct', 'cpu_peak_pct']
+            
+            all_cols = base_cols + [c for c in resource_cols if c in df_class.columns]
+            available_cols = [c for c in all_cols if c in df_class.columns]
+            df_class = df_class[available_cols]
             df_class.to_csv(self.level2_class_dir / f"{protocol}_{device}_class_report.csv", index=False)
             print(f"      💾 Saved detailed class report to {self.level2_class_dir}")
 
@@ -1308,6 +1224,11 @@ class ResultsAggregator:
             pd.DataFrame(self.all_level1_summaries).to_csv(
                 self.level1_dir / 'level1_all_results.csv', index=False)
 
+
+# =============================================================================
+# MAIN FUNCTION
+# =============================================================================
+
 def main():
     """Main orchestrator."""
     
@@ -1316,10 +1237,12 @@ def main():
     
     print("\n" + "="*80)
     print("UNSUPERVISED MULTICLASS ATTACK CLASSIFICATION")
+    print("One-vs-All Anomaly Detection Approach")
     print("="*80)
     print(f"Root Directory: {ROOT_DIR}")
     print(f"Device: CPU (PyTorch)")
     print(f"Random Seeds: [42, 123, 456]")
+    print(f"ResourceProfiler Available: {RESOURCE_PROFILER_AVAILABLE}")
     
     # Initialize components
     loader = DatasetLoader(ROOT_DIR)

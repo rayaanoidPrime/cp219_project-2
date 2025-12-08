@@ -8,21 +8,22 @@ ROOT_DIR = r"C:\Users\sengu\Documents\cp219_project-2\data\Final_Datasets\Final_
 # Target columns to search for
 TARGET_COLUMNS = [
     'integer_7',
-    'integer_5',
     'integer_8',
-    'integer_6',
-    'timestamp_diff',
-    'stNum',
     'time_diff',
-    'floatvalue_3',
-    'floatvalue_1',
-    'freq',
+    'timestamp_diff',
+    'integer_6',
+    'stNum',
+    'integer_5',
     'Length',
-    'index',
-    'floatvalue_2',
+    'sqNum_diff',
+    'sqNum',
+    'floatvalue_3',
+    'integer_3',
+    'floatvalue_1',
     'stNum_diff',
-    'sqNum_diff'
+    'time_from_start'
 ]
+
 
 def check_columns_in_dataset(root_dir: str, target_cols: List[str]) -> Dict:
     """
