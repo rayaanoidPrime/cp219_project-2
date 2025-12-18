@@ -17,6 +17,11 @@ from sklearn.metrics import (
     accuracy_score, classification_report, precision_score, recall_score, f1_score,
     adjusted_rand_score, normalized_mutual_info_score
 )
+from sklearn.decomposition import PCA
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend to avoid tkinter threading issues
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 # PyTorch imports
 import torch
@@ -34,6 +39,109 @@ except ImportError:
     print("Warning: ResourceProfiler not available. Resource metrics will be disabled.")
 
 warnings.filterwarnings('ignore')
+
+
+# =============================================================================
+# CLUSTER VISUALIZATION FUNCTIONS
+# =============================================================================
+
+def plot_cluster_comparison(X, y_true, y_pred, model_name: str, attack_mapping: Dict,
+                           save_path: str = None, title_prefix: str = ""):
+    """
+    Create side-by-side 2D scatter plots comparing original labels vs predicted labels.
+    
+    Uses PCA for dimensionality reduction to visualize high-dimensional data in 2D.
+    
+    Parameters:
+    -----------
+    X : np.ndarray
+        Feature matrix (already scaled)
+    y_true : np.ndarray
+        Ground truth labels
+    y_pred : np.ndarray
+        Predicted labels from the model
+    model_name : str
+        Name of the model for the plot title
+    attack_mapping : Dict
+        Mapping from class names to numeric IDs
+    save_path : str, optional
+        Path to save the plot. If None, displays the plot.
+    title_prefix : str, optional
+        Prefix for the plot title (e.g., dataset/device name)
+    """
+    # Reduce to 2D using PCA
+    pca = PCA(n_components=2, random_state=42)
+    X_2d = pca.fit_transform(X)
+    
+    # Create reverse mapping for legend
+    id_to_name = {v: k for k, v in attack_mapping.items()}
+    
+    # Get unique classes for consistent coloring
+    unique_classes = sorted(set(y_true) | set(y_pred))
+    n_classes = len(unique_classes)
+    
+    # Create a color palette
+    if n_classes <= 10:
+        colors = plt.cm.tab10(np.linspace(0, 1, 10))[:n_classes]
+    else:
+        colors = plt.cm.tab20(np.linspace(0, 1, min(n_classes, 20)))
+    
+    color_map = {cls: colors[i] for i, cls in enumerate(unique_classes)}
+    
+    # Create figure with two subplots
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # Plot 1: Original Labels (Ground Truth)
+    ax1 = axes[0]
+    for cls in unique_classes:
+        mask = y_true == cls
+        label = id_to_name.get(cls, f"Class {cls}")
+        ax1.scatter(X_2d[mask, 0], X_2d[mask, 1], 
+                   c=[color_map[cls]], label=label, 
+                   alpha=0.6, s=20, edgecolors='none')
+    
+    ax1.set_xlabel('PCA Component 1', fontsize=11)
+    ax1.set_ylabel('PCA Component 2', fontsize=11)
+    ax1.set_title('Ground Truth Labels', fontsize=13, fontweight='bold')
+    ax1.legend(loc='upper right', fontsize=9, markerscale=1.5)
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Predicted Labels
+    ax2 = axes[1]
+    for cls in unique_classes:
+        mask = y_pred == cls
+        label = id_to_name.get(cls, f"Class {cls}")
+        ax2.scatter(X_2d[mask, 0], X_2d[mask, 1], 
+                   c=[color_map[cls]], label=label, 
+                   alpha=0.6, s=20, edgecolors='none')
+    
+    ax2.set_xlabel('PCA Component 1', fontsize=11)
+    ax2.set_ylabel('PCA Component 2', fontsize=11)
+    ax2.set_title('Predicted Labels', fontsize=13, fontweight='bold')
+    ax2.legend(loc='upper right', fontsize=9, markerscale=1.5)
+    ax2.grid(True, alpha=0.3)
+    
+    # Overall title
+    explained_var = pca.explained_variance_ratio_.sum() * 100
+    suptitle = f"{title_prefix}{model_name} - Cluster Visualization"
+    fig.suptitle(suptitle, fontsize=14, fontweight='bold', y=1.02)
+    
+    # Add variance explained annotation
+    fig.text(0.5, -0.02, f'PCA explains {explained_var:.1f}% of variance', 
+             ha='center', fontsize=10, style='italic')
+    
+    plt.tight_layout()
+    
+    # Save or show
+    if save_path:
+        plt.savefig(save_path, dpi=330, bbox_inches='tight', 
+                   facecolor='white', edgecolor='none')
+        plt.close(fig)
+        print(f"      📊 Saved plot: {save_path}")
+    else:
+        plt.show()
+    
+    return fig
 
 
 # =============================================================================
@@ -1025,22 +1133,31 @@ class ExperimentRunner:
             # Get per-class resource metrics if available
             class_resources = model.get_class_resources()
             
-            return metrics, per_class_metrics, class_resources
+            # Return data for visualization (X_test_scaled, y_pred)
+            viz_data = {
+                'X_test_scaled': X_test_scaled,
+                'y_pred': y_pred
+            }
+            
+            return metrics, per_class_metrics, class_resources, viz_data
             
         except Exception as e:
             print(f"        ❌ Error in experiment: {str(e)}")
             import traceback
             traceback.print_exc()
-            return None, None, None
+            return None, None, None, None
     
     def run_multiple_runs(self, model_name: str, model_factory, X_train, y_train, 
-                         X_test, y_test, n_clusters: int, attack_mapping: Dict) -> Optional[Dict]:
-        """Run 3 times, average summaries, and collect per-class data."""
+                         X_test, y_test, n_clusters: int, attack_mapping: Dict,
+                         save_plots: bool = True, plot_dir: str = 'results/cluster_plots',
+                         dataset_name: str = '', device_name: str = '') -> Optional[Dict]:
+        """Run 3 times, average summaries, collect per-class data, and generate cluster plots."""
         print(f"      🔬 Training {model_name}...")
         
         summary_metrics_list = []
         class_metrics_list = []  # List of dicts
         class_resources_list = []  # List of resource dicts
+        viz_data_first_run = None  # Store visualization data from first run
 
         for run_idx, seed in enumerate(self.random_seeds, start=1):
             print(f"        Run {run_idx}/3 (seed={seed})...", end=' ')
@@ -1051,7 +1168,7 @@ class ExperimentRunner:
                 model.n_clusters = n_clusters
             
             # Run experiment
-            summary, per_class, class_resources = self.run_single_experiment(
+            summary, per_class, class_resources, viz_data = self.run_single_experiment(
                 model, X_train, y_train, X_test, y_test, seed
             )
             
@@ -1064,10 +1181,38 @@ class ExperimentRunner:
             if class_resources:
                 class_resources_list.append(class_resources)
             
+            # Store viz data from first successful run for plotting
+            if viz_data_first_run is None and viz_data is not None:
+                viz_data_first_run = viz_data
+            
             print(f"✓ Acc={summary['accuracy']:.4f}, Macro F1={summary['macro_f1']:.4f}")
         
         if not summary_metrics_list:
             return None, None
+        
+        # Generate cluster comparison plot using first run's data
+        if save_plots and viz_data_first_run is not None:
+            plot_dir_path = Path(plot_dir)
+            plot_dir_path.mkdir(parents=True, exist_ok=True)
+            
+            # Create filename
+            safe_dataset = dataset_name.replace(' ', '_').replace('/', '_')
+            safe_device = device_name.replace(' ', '_').replace('/', '_')
+            safe_model = model_name.replace(' ', '_').replace('/', '_')
+            plot_filename = f"{safe_dataset}_{safe_device}_{safe_model}_clusters.png"
+            plot_path = plot_dir_path / plot_filename
+            
+            # Generate plot
+            title_prefix = f"{dataset_name} / {device_name}\n" if dataset_name or device_name else ""
+            plot_cluster_comparison(
+                X=viz_data_first_run['X_test_scaled'],
+                y_true=y_test,
+                y_pred=viz_data_first_run['y_pred'],
+                model_name=model_name,
+                attack_mapping=attack_mapping,
+                save_path=str(plot_path),
+                title_prefix=title_prefix
+            )
         
         # 1. Average Summary Metrics (Scalar values)
         avg_summary = {}
@@ -1233,7 +1378,7 @@ def main():
     """Main orchestrator."""
     
     # Configuration
-    ROOT_DIR = r"C:\Users\sengu\Documents\cp219_project-2\data\Final_Datasets\Final_Datasets\preprocessed_new\preprocessed_new"
+    ROOT_DIR = r"C:\Users\Rayaan_Ghosh\Desktop\OSS\cp219_project-2\data\Final_Datasets\Final_Datasets\preprocessed_new\preprocessed_new"
     
     print("\n" + "="*80)
     print("UNSUPERVISED MULTICLASS ATTACK CLASSIFICATION")
@@ -1294,7 +1439,11 @@ def main():
                 summary, class_details = runner.run_multiple_runs(
                     model_name, model_factory, 
                     X_train, y_train, X_test, y_test,
-                    n_clusters, attack_mapping
+                    n_clusters, attack_mapping,
+                    save_plots=True,
+                    plot_dir='results/cluster_plots',
+                    dataset_name=protocol_name,
+                    device_name=device_name
                 )
                 device_summaries[model_name] = summary
                 device_class_details[model_name] = class_details
@@ -1312,6 +1461,7 @@ def main():
     print("✅ TRAINING COMPLETE!")
     print("="*80)
     print(f"Results saved in: {aggregator.output_dir}")
+    print(f"Cluster plots saved in: results/cluster_plots")
 
 
 if __name__ == "__main__":
