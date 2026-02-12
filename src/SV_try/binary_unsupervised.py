@@ -272,10 +272,10 @@ def run_detector(detector_name, detector_factory, X_train, y_train, X_val, y_val
         }
     
     # Tune threshold on validation set (proper hyperparameter tuning)
-    # if X_val is not None and y_val is not None and len(X_val) > 0:
-    #     tuned_threshold = tune_threshold_on_validation(detector, X_val, y_val)
-        # if tuned_threshold is not None:
-        #     detector.threshold = tuned_threshold
+    if X_val is not None and y_val is not None and len(X_val) > 0:
+        tuned_threshold = tune_threshold_on_validation(detector, X_val, y_val)
+        if tuned_threshold is not None:
+            detector.threshold = tuned_threshold
     
     # Testing with resource profiling
     if RESOURCE_PROFILER_AVAILABLE:
