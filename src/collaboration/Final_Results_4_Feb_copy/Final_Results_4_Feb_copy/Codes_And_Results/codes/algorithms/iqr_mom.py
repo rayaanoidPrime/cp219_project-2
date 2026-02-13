@@ -1,0 +1,418 @@
+import os
+import sys
+import numpy as np
+import pandas as pd
+import time
+import psutil
+import argparse
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import (
+    confusion_matrix, classification_report,
+    precision_score, recall_score, f1_score,
+    roc_auc_score, average_precision_score,
+    balanced_accuracy_score, matthews_corrcoef
+)
+
+# --- Project utilities ---
+sys.path.append('c:/Users/Rayaan_Ghosh/Desktop/OSS/cp219_project-2/src/collaboration/Final_Results_4_Feb_copy/Final_Results_4_Feb_copy/Codes_And_Results/codes')
+import utility.resource_usage as ru
+import utility.unsupervised_helper as uh
+import utility.plot_helper as ph
+
+# ==============================================================================
+# Global constants
+# ==============================================================================
+LABEL_COL   = 'attack'
+ALGO_NAME   = 'iqr_mom'
+TRIPLET_DIR  = 'c:/Users/Rayaan_Ghosh/Desktop/OSS/cp219_project-2/src/collaboration/Final_Results_4_Feb_copy/Final_Results_4_Feb_copy/Codes_And_Results/triplet_plot_data'
+
+# --- New directories for visualization data ---
+# IQR2_DATA_DIR  = '/home/vista/OCT7Files/unsupervised_codes_Shailja/iqr_2_data'
+# IQR2_PLOTS_DIR = '/home/vista/OCT7Files/unsupervised_codes_Shailja/iqr_2_plots'
+
+
+# =============================================================
+# Set Up Logging
+# =============================================================
+import logging
+logging.basicConfig(filename =uh.LOG_FILE,level = logging.INFO)
+logger = logging.getLogger(ALGO_NAME)
+def log_run_status(ds, run_key, success=True, e=None):
+    # 1. Define the icons
+    # ✅ = U+2705, ❌ = U+274C
+    status_icon = "✅ Success" if success else "❌ Failed "
+
+    # 2. Extract variables (as per your request)
+    dataset = ds['dataset']
+    attack = ds['attack_type']
+    goid = ds['goid']
+    split = "Test" # Hardcoded as requested
+    run = run_key
+
+    # 3. Create the formatted string with alignment
+    # :<15 means "align left, occupy 15 spaces"
+    log_msg = (
+        f"{dataset:<15} | "
+        f"{attack:<15} | "
+        f"{goid:<10} | "
+        f"{split:<6} | "
+        f"Run {run:<4} | "
+        f"{status_icon}"
+        f"Error {e}"
+    )
+
+    # 4. Log it
+    if success:
+        logger.info(log_msg)
+    else:
+        # Use logger.error if it failed, so it highlights in log viewers
+        logger.error(log_msg)
+
+# ==============================================================================
+# Core logic
+# ==============================================================================
+def _row_scores_from_robust_stats(X, medians, iqrs):
+    z = np.abs((X - medians) /iqrs)
+    scores = np.ones_like(z)
+    scores[(z > 1) & (z <= 2)] = 2
+    scores[z > 2] = 3
+   
+    row_scores = np.sum(scores, axis=1) #orig=sum
+    return row_scores, scores
+
+def _group_mean_scores(df: pd.DataFrame, row_scores: np.ndarray, group_col: str):
+    if group_col not in df.columns:
+        raise ValueError(f"Missing grouping column '{group_col}' in data.")
+    df_temp = pd.DataFrame({
+        group_col: df[group_col].values,
+        "score": row_scores
+    })
+    grouped = df_temp.groupby(group_col)["score"].mean()
+    return grouped
+
+
+def run_grouped_statistical(
+        X_train, df_train,
+        group_col="stNum",
+    ):
+    
+    # --- Per-feature medians and IQRs ---
+    medians = np.median(X_train, axis=0)
+    q75, q25 = np.percentile(X_train, [75, 25], axis=0)
+    iqrs = 1.5 * (q75 - q25) + 1e-8
+
+    # --- Row scores ---
+    row_scores, _ = _row_scores_from_robust_stats(X_train, medians, iqrs)
+
+    # --- Group-wise median score ---
+    group_means = _group_mean_scores(df_train, row_scores, group_col)
+
+    # --- Group size distribution ---
+    group_sizes = df_train.groupby(group_col).size()
+    q90_group_size = int(np.percentile(group_sizes, 95))
+
+    # --- Threshold for anomaly detection ---
+    median_group_score = float(np.median(group_means))
+    q75_group, q25_group = np.percentile(group_means, [75, 25])
+    iqr_group_score = float(q75_group - q25_group)
+    upper_threshold = median_group_score +  1.5 * iqr_group_score
+
+    # Return median_group_size also
+    return medians, iqrs, upper_threshold, q90_group_size
+
+
+def stream_batches(df, group_col='stNum', max_window_size=11):
+    current_group = None
+    buffer_idx = []
+
+    for idx, row in df.iterrows():
+        g = row[group_col]
+        if current_group is None:
+            current_group = g
+
+        if g != current_group:
+            if buffer_idx:
+                yield df.loc[buffer_idx]
+            buffer_idx = [idx]
+            current_group = g
+            continue
+
+        buffer_idx.append(idx)
+        if len(buffer_idx) >= max_window_size:
+            yield df.loc[buffer_idx]
+            buffer_idx = []
+
+    if buffer_idx:
+        yield df.loc[buffer_idx]
+
+
+def predict_grouped(df: pd.DataFrame, X, medians, iqrs, upper_threshold, group_col="stNum", window_size=10, group_means_scalar=None):
+    y_pred = np.zeros(len(X), dtype=int)
+    row_scores_all = []
+    for batch in stream_batches(df, group_col=group_col, max_window_size=window_size):
+        batch_indices = batch.index.tolist()
+        batch_X = X[batch_indices]
+        row_scores, feature_scores = _row_scores_from_robust_stats(batch_X, medians, iqrs)
+        row_scores_all.extend(row_scores.tolist())
+        group_median = np.mean(row_scores)
+
+        if group_median > upper_threshold:
+            for j, idx in enumerate(batch_indices):
+                if feature_scores[j].max() >= 3:
+                    y_pred[idx] = 1
+
+    return y_pred, row_scores_all
+
+
+def predict_grouped_fast(df: pd.DataFrame, X, medians, iqrs, upper_threshold, group_col="stNum", window_size=10):
+    y_pred = np.zeros(len(X), dtype=int)
+    
+    # 1. Vectorized Row Scoring 
+    # Avoids calling _row_scores_from_robust_stats multiple times
+    z = np.abs((X - medians) / iqrs)
+    feature_scores = np.ones_like(z, dtype=np.int8)
+    feature_scores[(z > 1) & (z <= 2)] = 2
+    feature_scores[z > 2] = 3
+    row_scores_all = np.sum(feature_scores, axis=1)
+
+    # 2. Pre-calculating Group Boundaries
+    # Find where the group_col changes
+    group_values = df[group_col].values
+    diffs = np.where(group_values[:-1] != group_values[1:])[0] + 1
+    boundaries = np.concatenate(([0], diffs, [len(df)]))
+
+    # 3.Slicing
+    for i in range(len(boundaries) - 1):
+        start = boundaries[i]
+        end = boundaries[i+1]
+        
+        # Apply window_size logic 
+        # Slicing the pre-calculated scores is much faster than re-calculating
+        for sub_start in range(start, end, window_size):
+            sub_end = min(sub_start + window_size, end)
+            
+            # Logic: group_median > upper_threshold
+            batch_row_scores = row_scores_all[sub_start:sub_end]
+            if np.mean(batch_row_scores) > upper_threshold:
+                # Logic: feature_scores[j].max() >= 3
+                # We check only the rows in this specific sub-batch
+                batch_feat_scores = feature_scores[sub_start:sub_end]
+                # mask returns indices relative to the sub-batch
+                mask = np.any(batch_feat_scores >= 3, axis=1)
+                y_pred[sub_start:sub_end][mask] = 1
+
+    return y_pred, row_scores_all.tolist()
+
+
+
+# ==============================================================================
+# Main pipeline
+# ==============================================================================
+def main(train_input_path=None,
+         test_input_path=None,
+         validation_input_path=None,
+         output_dir=None,
+         scaled_input=False,
+         use_freq=False,
+         use_features='all',
+                  ds=None):
+
+    # ---------------- load data ----------------
+    df_train = pd.read_csv(train_input_path)
+    df_val   = pd.read_csv(validation_input_path)
+    df_test  = pd.read_csv(test_input_path)
+
+    #---------- Extract features/labels ----------     
+    X_train, X_val, X_test, \
+    y_train, y_val, y_test, \
+    df_train, df_val, df_test, \
+    cols = uh.get_trainable_data(
+        df_train=df_train,
+        df_val=df_val,
+        df_test=df_test,
+        scaled_input=scaled_input,
+        use_freq=use_freq,
+        use_features=use_features
+    )
+
+    # ---------- Counts ----------
+    n_train_attack, n_train_normal = uh.count_stat(y_train).get(1, 0), uh.count_stat(y_train).get(0, 0)
+    n_test_attack,  n_test_normal  = uh.count_stat(y_test).get(1, 0),  uh.count_stat(y_test).get(0, 0)
+    n_val_attack,   n_val_normal   = uh.count_stat(y_val).get(1, 0),   uh.count_stat(y_val).get(0, 0)
+
+    df_train[cols] = X_train; df_val[cols] = X_val; df_test[cols] = X_test
+
+    all_runs_results = {}
+    N_LOOPS = 1
+    num_runs = 1
+
+    # ==============================================================================
+    #                     MAIN LOOP (runs)
+    # ==============================================================================
+    for i in range(1, num_runs + 1):
+        run_key = f"Run_{i}"
+
+        try:
+            with ru.ResourceProfiler() as profiler_train:
+                # Loop the training task N_LOOPS times
+                for _ in range(N_LOOPS):
+                    medians, iqrs, thr, grp_size = run_grouped_statistical(
+                X_train,df_train,group_col="stNum")
+            avg_train_wall_ns = profiler_train.wall_nanoseconds / N_LOOPS
+            avg_time_pkt_tr = avg_train_wall_ns / len(y_train) if len(y_train) else None   
+            
+
+            # ---------- Test metrics ----------
+
+            with ru.ResourceProfiler() as profiler:
+                # Loop the training task N_LOOPS times
+                for _ in range(N_LOOPS):
+                    # y_test_pred, scores = predict_grouped(df_test, X_test, medians, iqrs,thr, window_size=grp_size)
+                    y_test_pred, scores = predict_grouped_fast(df=df_test, X=X_test, medians=medians, iqrs=iqrs,upper_threshold=thr, window_size=grp_size)
+
+            avg_test_wall_ns = profiler.wall_nanoseconds / N_LOOPS
+            avg_time_pkt_te = avg_test_wall_ns / len(y_test) if len(y_test) else None
+
+            cm_te= confusion_matrix(y_test, y_test_pred, labels=[0,1])
+            tn_te, fp_te, fn_te, tp_te = cm_te.ravel()
+            rpt_te = classification_report(y_test, y_test_pred, labels=[0,1], target_names=['normal','attack'],
+                                        zero_division=0, output_dict=True)
+            precision_anom_te = precision_score(y_test, y_test_pred, pos_label=1, zero_division=0)
+            recall_anom_te    = recall_score(y_test, y_test_pred, pos_label=1, zero_division=0)
+            f1_anom_te        = f1_score(y_test, y_test_pred, pos_label=1, zero_division=0)
+            balanced_acc_te   = balanced_accuracy_score(y_test, y_test_pred)
+            mcc_te            = matthews_corrcoef(y_test, y_test_pred)
+
+
+            pr_auc = average_precision_score(y_test, scores)
+            roc_auc = roc_auc_score(y_test, scores)
+
+            test_json = {
+                "Normal count"          : int(n_test_normal),
+                "Attack count"          : int(n_test_attack),
+                "Total"                 : int(n_test_normal + n_test_attack),
+                "tp"                    : int(tp_te),
+                "tn"                    : int(tn_te),
+                "fp"                    : int(fp_te),
+                "fn"                    : int(fn_te),
+                "Accuracy %"            : uh.r2(rpt_te['accuracy']*100),   # Overall accuracy
+                "Precision_anom %"      : uh.r2(precision_anom_te*100),    # Precision for anomaly class
+                "Precision %"           : uh.r2(rpt_te["macro avg"]["precision"]*100), # Macro avg precision
+                "Recall_anom %"         : uh.r2(recall_anom_te*100),         # Recall for anomaly class
+                "Recall %"              : uh.r2(rpt_te["macro avg"]["recall"]*100), # Macro avg recall
+                "F1-Score_anom %"       : uh.r2(f1_anom_te*100),          # F1-Score for anomaly class
+                "F1-Score %"            : uh.r2(rpt_te["macro avg"]["f1-score"]*100),   
+                "BalancedAcc %"         : uh.r2(balanced_acc_te*100),      # Balanced accuracy
+                "MCC"                   : uh.r3(mcc_te), # Matthews correlation coefficient
+                "PR-AUC"                : uh.r3(pr_auc*100),
+                "ROC-AUC"               : uh.r3(roc_auc*100),
+                "TotalTime (ms)"        : uh.r3(avg_test_wall_ns / 1_000_000),
+                "AvgTimePerPacket(ns)"  : uh.r3(avg_time_pkt_te),
+                "Ram_usage"             : uh.r3(profiler.peak_ram_mb),
+                "CPU_avg%"              : uh.r3(profiler.cpu_avg_machine_pct),
+                "CPU_peak%"             : uh.r3(profiler.cpu_peak_machine_pct),
+                "training_time_ms"      : uh.r3(avg_train_wall_ns / 1_000_000),
+                "training_avg_time_per_packet_ns": uh.r3(avg_time_pkt_tr),
+                "training_peak_ram_mb"  : uh.r3(profiler_train.peak_ram_mb),
+                "training_cpu_avg_pct"  : uh.r3(profiler_train.cpu_avg_machine_pct),
+                "training_cpu_peak_pct" : uh.r3(profiler_train.cpu_peak_machine_pct),
+                "n_train_attack"        : int(n_train_attack),
+                "n_train_normal"        : int(n_train_normal)
+            }
+            log_run_status(ds, run_key, success=True)
+        except Exception as e:
+            # print(f"Error during run {i} of {ALGO_NAME}: {e}", file=sys.stderr)
+            test_json = {
+                "Normal count"          : 0, 
+                "Attack count"          : 0,
+                "Total"                 : 0,
+                "tp"                    : 0,
+                "tn"                    : 0, 
+                "fp"                    : 0,
+                "fn"                    : 0,
+                "Accuracy %"            : 0,
+                "Precision %"           : 0,
+                "Recall %"              : 0,
+                "F1-Score %"            : 0,
+                "Precision_anom %"      : 0,
+                "Recall_anom %"         : 0,
+                "F1-Score_anom %"       : 0,
+                "PR-AUC"                : 0,
+                "ROC-AUC"               : 0,
+                "TotalTime (ms)"        : 0, # Convert avg ns to ms
+                "AvgTimePerPacket(ns)"  : 0,
+                "Ram_usage"             : 0, # This is TOTAL RAM
+                "CPU_avg%"              : 0,
+                "CPU_peak%"             : 0,
+                "training_time_ms"      : 0,
+                "training_avg_time_per_packet_ns": 0,
+                "training_peak_ram_mb"  : 0,
+                "training_cpu_avg_pct"  : 0,
+                "training_cpu_peak_pct" : 0,
+                "n_train_attack"        : 0,
+                "n_train_normal"        : 0   
+            }
+            log_run_status(ds, run_key, success=False, e=e)
+
+        all_runs_results[run_key] = {
+            "Test":       test_json
+        }
+
+    return all_runs_results
+
+
+# ==============================================================================
+# Local test
+# ==============================================================================
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=f"Run {ALGO_NAME} analysis.")
+    
+    # --- Required Paths ---
+    parser.add_argument('--train_input_path', type=str, required=True, help='Path to the training CSV (normal_only.csv)')
+    parser.add_argument('--test_input_path', type=str, required=True, help='Path to the testing CSV (attack_and_normal.csv)')
+    parser.add_argument('--validation_input_path', type=str, required=True, help='Path to the validation CSV (attack_and_normal.csv)')
+    parser.add_argument('--output_dir', type=str, required=True, help='Directory to save results and plots')
+
+
+
+    parser.add_argument('--dataset', type=str, default='all', help='Dataset')
+    parser.add_argument('--goid', type=str, default='all', help='GoID')
+    parser.add_argument('--attack_type', type=str, default='all', help='Attack_Scn')
+    
+    args = parser.parse_args()
+
+    # Create the output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # print(f"Running {ALGO_NAME} on {args.train_input_path}")    
+
+    get_bool_from_str =lambda x : False if x == 'False' else True
+    
+    dataset=args.dataset
+    goid=args.goid
+    attack_type=args.attack_type
+    ds={'dataset':dataset,
+        'goid':goid,
+        'attack_type':attack_type
+    }
+    
+    # Call your main function with the parsed arguments
+    results = main(
+        train_input_path=args.train_input_path,
+        test_input_path=args.test_input_path,
+        validation_input_path=args.validation_input_path,
+        output_dir=args.output_dir,
+        scaled_input=True,
+        use_freq=False,
+        use_features='original',
+        ds=ds
+    )
+
+    long_csv_path = os.path.join(uh.PLOT_DATA_DIR, f"{ALGO_NAME}_metrics_long.csv")
+
+    # metrics_long rows
+    rows = uh.extract_plot_rows(results, ALGO_NAME, ds) + uh.extract_average_rows_over_runs(results, ALGO_NAME, ds)
+    uh.append_rows_to_long_csv(long_csv_path, rows)
+    
+    # print(f"{ALGO_NAME} complete for {args.output_dir}")

@@ -18,3 +18,5 @@ results/**
 outputs/**
 *.zip
 
+*.csv
+*.log
