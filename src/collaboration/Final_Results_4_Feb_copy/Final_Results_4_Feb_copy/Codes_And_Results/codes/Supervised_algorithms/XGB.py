@@ -139,7 +139,7 @@ def main(train_input_path=None,
     triplet_root = os.path.join(TRIPLET_DIR, ALGO_NAME, dataset, goid, attack)
 
     all_runs_results = {}
-    N_LOOPS = 1
+    N_LOOPS = 3
     num_runs = 1
     # ==============================================================
     #                         MAIN LOOP

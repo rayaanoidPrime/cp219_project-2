@@ -98,19 +98,7 @@ def main(algorithm=None,
     # heavy_algo =['spectral_clustering', 'ward',  'pam', 'singleLink', 'ivat', 'KNN']
     for i, ds in enumerate(datasets):
         try:
-            progress = (i + 1) / total_datasets
-            bar_len = 40
-            bar = '█' * int(round(bar_len * progress)) + '-' * (bar_len - int(round(bar_len * progress)))
-
-            line = (
-                f"progress: [{bar}] {progress:.1%} ({i+1}/{total_datasets})"
-                f" | Processing: {ds['dataset']} > {ds['goid']} > {ds['attack_type']}"
-            )
-            # print(line)
-            # Clear previous line completely before writing a new one
-            sys.stdout.write('\r' + ' ' * (os.get_terminal_size().columns - 1) + '\r')
-            sys.stdout.write(line)
-            sys.stdout.flush()
+            print(f"  [{i+1}/{total_datasets}] {ds['dataset']} > {ds['goid']} > {ds['attack_type']}")
 
             output_dir = os.path.join('results_dir', ds['dataset'], ds['goid'], ds['attack_type']) #CHANGE TO BASE OUTPUT DIR
             os.makedirs(output_dir, exist_ok=True)
@@ -129,14 +117,7 @@ def main(algorithm=None,
                 '--attack_type',ds['attack_type']
             ]
 
-            original_stdout = sys.stdout
-            sys.stdout = open(os.devnull, 'w')
-            
-            subprocess.run(cmd, check=True)
-            
-            # Turn off output supression :Restore Algorithm prints
-            sys.stdout.close()
-            sys.stdout = original_stdout
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         
         except Exception as e:
@@ -149,28 +130,37 @@ if __name__ == "__main__":
 
     algorithms = [
         # ---IQR-------
-        # 'iqr_mom',
-        # 'iqr',
+        'iqr_mom',
+        'iqr_mom_2',
+        'iqr_mom_3',
+        'iqr_mom_4',
+        'iqr_mom_8',
+        'iqr_mom_16',
+        'iqr_mom_32',
+        'iqr_mom_64',
+        'iqr_mom_128',
+        'iqr_mom_256',
+        'iqr_mom_512',
         # 'z_score',
-        # # ---Clustering-------
+        # ---Clustering-------
         # 'pam',
         # 'clara',
-        'optics',
-        'singleLink',
-        'ward',
-        'spectral_clustering',
-        'kmeans',
-        'gmm',
-        'hbos',
+        # 'optics',
+        # 'singleLink',
+        # 'ward',
+        # 'spectral_clustering',
+        # 'kmeans',
+        # 'gmm',
+        # 'hbos',
         # ---Reconstruction Err-------
-        'pca',
-        'vae',
-        'ae',
+        # 'pca',
+        # 'vae',
+        # 'ae',
         # ---AD-------
-        'lof',
-        'If',
-        'ocsvm',
-        'svdd',
+        # 'lof',
+        # 'If',
+        # 'ocsvm',
+        # 'svdd',
         # ---supervised-------
         # 'LR',
         # 'NB',
@@ -205,30 +195,30 @@ if __name__ == "__main__":
             )
         print()
 
-    # algo_type='unsupervised'
-    # OUTPUT_DIR = 'c:/Users/Rayaan_Ghosh/Desktop/OSS/cp219_project-2/src/collaboration/Final_Results_4_Feb_copy/Final_Results_4_Feb_copy/Codes_And_Results/all_plots_data/CombinedResults'
-    # os.makedirs(OUTPUT_DIR, exist_ok=True)
+    algo_type='unsupervised'
+    OUTPUT_DIR = 'c:/Users/Rayaan_Ghosh/Desktop/OSS/cp219_project-2/src/collaboration/Final_Results_4_Feb_copy/Final_Results_4_Feb_copy/Codes_And_Results/all_plots_data/CombinedResults'
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     # ftest_ouput_dir = 'c:/Users/Rayaan_Ghosh/Desktop/OSS/cp219_project-2/src/collaboration/Final_Results_4_Feb_copy/Final_Results_4_Feb_copy/Codes_And_Results/all_plots_data/friedman'
     # os.makedirs(ftest_ouput_dir, exist_ok=True)
 
-    # all_individual_algorithms_path = 'c:/Users/Rayaan_Ghosh/Desktop/OSS/cp219_project-2/src/collaboration/Final_Results_4_Feb_copy/Final_Results_4_Feb_copy/Codes_And_Results/all_plots_data/Algorithm_wise_plots_data'
+    all_individual_algorithms_path = 'c:/Users/Rayaan_Ghosh/Desktop/OSS/cp219_project-2/src/collaboration/Final_Results_4_Feb_copy/Final_Results_4_Feb_copy/Codes_And_Results/all_plots_data/Algorithm_wise_plots_data'
     # os.makedirs(ftest_ouput_dir, exist_ok=True)
     
-    # if algo_type=='unsupervised':
-    #     combined_output_filename    = os.path.join(OUTPUT_DIR,'combined_averages.csv')
-    #     pivot_input_filename        = combined_output_filename
-    #     pivot_output_filename       = os.path.join(OUTPUT_DIR, f'pivot_unsupervised_{uh.col_name}.csv')
-    #     table_input_filename        = pivot_output_filename
-    #     table_output_filename       = os.path.join(OUTPUT_DIR, f'results_table_unsupervised_{uh.col_name}.html')
-    #     ftest_input_path            = pivot_output_filename
+    if algo_type=='unsupervised':
+        combined_output_filename    = os.path.join(OUTPUT_DIR,'combined_averages.csv')
+        pivot_input_filename        = combined_output_filename
+        pivot_output_filename       = os.path.join(OUTPUT_DIR, f'pivot_unsupervised_{uh.col_name}.csv')
+        table_input_filename        = pivot_output_filename
+        table_output_filename       = os.path.join(OUTPUT_DIR, f'results_table_unsupervised_{uh.col_name}.html')
+        ftest_input_path            = pivot_output_filename
         
-    # plot_bars(alg_whitelist=algorithms)
+    plot_bars(alg_whitelist=algorithms)
     
-    # aggregateResults.main(all_individual_algorithms_path, OUTPUT_DIR, combined_output_filename, algo_type)
+    aggregateResults.main(all_individual_algorithms_path, OUTPUT_DIR, combined_output_filename, algo_type)
 
-    # makePivotFiles.main(input_csv=pivot_input_filename, out_csv=pivot_output_filename)
+    makePivotFiles.main(input_csv=pivot_input_filename, out_csv=pivot_output_filename)
     
-    # plotTables.main(input_csv=table_input_filename,out_html= table_output_filename)
+    plotTables.main(input_csv=table_input_filename,out_html= table_output_filename)
     
     # ftest2.main(in_path=ftest_input_path, out_dir=ftest_ouput_dir)
 

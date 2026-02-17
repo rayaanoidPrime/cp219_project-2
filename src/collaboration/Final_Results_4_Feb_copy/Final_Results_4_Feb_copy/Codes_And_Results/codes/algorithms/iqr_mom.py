@@ -244,7 +244,7 @@ def main(train_input_path=None,
     df_train[cols] = X_train; df_val[cols] = X_val; df_test[cols] = X_test
 
     all_runs_results = {}
-    N_LOOPS = 1
+    N_LOOPS = 3
     num_runs = 1
 
     # ==============================================================================

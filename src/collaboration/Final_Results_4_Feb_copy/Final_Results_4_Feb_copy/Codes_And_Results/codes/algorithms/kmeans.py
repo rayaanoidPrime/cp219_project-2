@@ -131,7 +131,7 @@ def main(train_input_path=None,
     n_test_attack,  n_test_normal  = uh.count_stat(y_test).get(1, 0),  uh.count_stat(y_test).get(0, 0)
 
     all_runs_results = {}
-    N_LOOPS = 1
+    N_LOOPS = 3
     num_runs = 1
 
 

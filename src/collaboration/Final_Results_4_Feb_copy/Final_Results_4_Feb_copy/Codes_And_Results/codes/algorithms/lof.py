@@ -154,7 +154,7 @@ def main(train_input_path=None,
     group_col = "stNum"
 
     all_runs_results = {}
-    N_LOOPS = 1
+    N_LOOPS = 3
     num_runs = 1
 
     # ==============================================================

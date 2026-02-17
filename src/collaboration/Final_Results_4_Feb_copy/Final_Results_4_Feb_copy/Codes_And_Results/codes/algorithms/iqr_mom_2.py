@@ -1,9 +1,11 @@
 import os
 import sys
-import argparse
 import numpy as np
 import pandas as pd
-import random
+import time
+import psutil
+import argparse
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import confusion_matrix, classification_report
 from sklearn.metrics import (
     confusion_matrix, classification_report,
@@ -12,24 +14,24 @@ from sklearn.metrics import (
     balanced_accuracy_score, matthews_corrcoef
 )
 
-from sklearn.linear_model import LogisticRegression
-
 # --- Project utilities ---
 sys.path.append('c:/Users/Rayaan_Ghosh/Desktop/OSS/cp219_project-2/src/collaboration/Final_Results_4_Feb_copy/Final_Results_4_Feb_copy/Codes_And_Results/codes')
 import utility.resource_usage as ru
 import utility.unsupervised_helper as uh
 import utility.plot_helper as ph
 
+# ==============================================================================
+# Global constants
+# ==============================================================================
 LABEL_COL   = 'attack'
-ALGO_NAME   = 'LR'
-IF_DATA_DIR = 'c:/Users/Rayaan_Ghosh/Desktop/OSS/cp219_project-2/src/collaboration/Final_Results_4_Feb_copy/Final_Results_4_Feb_copy/OCT7Files/unsupervised_codes_Shailja/LR_data'
-RESULTS_DIR = 'c:/Users/Rayaan_Ghosh/Desktop/OSS/cp219_project-2/src/collaboration/Final_Results_4_Feb_copy/Final_Results_4_Feb_copy/Codes_And_Results/results/Individual_algorithms'
-TRIPLET_DIR = 'c:/Users/Rayaan_Ghosh/Desktop/OSS/cp219_project-2/src/collaboration/Final_Results_4_Feb_copy/Final_Results_4_Feb_copy/Codes_And_Results/triplet_plot_data'
+ALGO_NAME   = 'iqr_mom_2'
+TRIPLET_DIR = '/home/shailja/Desktop/PowerGrid/Final_Results_4_Feb/Codes_And_Results/triplet_plot_data'
+WINDOW_SIZE = 2
 
+# --- New directories for visualization data ---
+# IQR2_DATA_DIR  = '/home/vista/OCT7Files/unsupervised_codes_Shailja/iqr_2_data'
+# IQR2_PLOTS_DIR = '/home/vista/OCT7Files/unsupervised_codes_Shailja/iqr_2_plots'
 
-def _ensure_dir(p):
-    os.makedirs(p, exist_ok=True)
-    return p
 
 # =============================================================
 # Set Up Logging
@@ -68,33 +70,89 @@ def log_run_status(ds, run_key, success=True, e=None):
         # Use logger.error if it failed, so it highlights in log viewers
         logger.error(log_msg)
 
-     
 # ==============================================================================
-# Core primitives (capture cpu/mem/time)
+# Core logic
 # ==============================================================================
+def _row_scores_from_robust_stats(X, medians, iqrs):
+    z = np.abs((X - medians) / iqrs)
 
-def run_lr(X_train,
-            y_train):
-    random_state = random.randint(0, 100)
+    scores = np.ones_like(z)
+    scores[(z > 1) & (z <= 2)] = 2
+    scores[z > 2] = 3
 
-
-
-
-    lr = LogisticRegression(random_state=random_state)
-    lr.fit(X_train, y_train) 
-
-    return lr
+    row_scores = np.sum(scores, axis=1)
+    return row_scores, scores
 
 
-def predict(model, X):
-    scores = model.predict_proba(X)[:, 1]
-    y_pred = model.predict(X)
 
-    return y_pred, scores
+
+def run_window_statistical(
+        X_train,
+        window_size=10,
+):
+    # --- Per-feature medians and IQRs ---
+    medians = np.median(X_train, axis=0)
+    q75, q25 = np.percentile(X_train, [75, 25], axis=0)
+    iqrs = 1.5 * (q75 - q25) + 1e-8
+
+    # --- Row scores ---
+    row_scores, _ = _row_scores_from_robust_stats(X_train, medians, iqrs)
+
+    # --- Window means ---
+    window_means = []
+    for i in range(0, len(row_scores), window_size):
+        window = row_scores[i:i + window_size]
+        if len(window) > 0:
+            window_means.append(np.mean(window))
+
+    window_means = np.array(window_means)
+
+    # --- Threshold ---
+    median_window_score = np.median(window_means)
+    q75_window, q25_window = np.percentile(window_means, [75, 25])
+    iqr_window_score = q75_window - q25_window
+
+    upper_threshold = median_window_score + 1.5 * iqr_window_score
+
+    return medians, iqrs, upper_threshold
+
+def stream_fixed_windows(X, window_size=10):
+    n = len(X)
+
+    for start in range(0, n, window_size):
+        end = min(start + window_size, n)
+        yield start, end, X[start:end]
+
+
+def predict_window_fast(
+        X,
+        medians,
+        iqrs,
+        upper_threshold,
+        window_size=10
+):
+    y_pred = np.zeros(len(X), dtype=int)
+    row_scores_all = []
+
+    for start, end, batch_X in stream_fixed_windows(X, window_size):
+        row_scores, feature_scores = _row_scores_from_robust_stats(
+            batch_X, medians, iqrs
+        )
+
+        row_scores_all.extend(row_scores.tolist())
+
+        window_mean = np.mean(row_scores)
+
+        if window_mean > upper_threshold:
+            for j in range(len(batch_X)):
+                if feature_scores[j].max() >= 3:
+                    y_pred[start + j] = 1
+
+    return y_pred, row_scores_all
 
 
 # ==============================================================================
-# Main pipeline (same outputs; adds resources into Misc)
+# Main pipeline
 # ==============================================================================
 def main(train_input_path=None,
          test_input_path=None,
@@ -103,9 +161,6 @@ def main(train_input_path=None,
          scaled_input=False,
          use_freq=False,
          use_features='all',
-         contamination=0.05,
-         n_estimators=400,
-         max_samples='auto',
                   ds=None):
 
     # ---------------- load data ----------------
@@ -113,7 +168,7 @@ def main(train_input_path=None,
     df_val   = pd.read_csv(validation_input_path)
     df_test  = pd.read_csv(test_input_path)
 
-    # Extract features/labels via project helper (unchanged core flow)
+    #---------- Extract features/labels ----------     
     X_train, X_val, X_test, \
     y_train, y_val, y_test, \
     df_train, df_val, df_test, \
@@ -126,50 +181,43 @@ def main(train_input_path=None,
         use_features=use_features
     )
 
+    # ---------- Counts ----------
     n_train_attack, n_train_normal = uh.count_stat(y_train).get(1, 0), uh.count_stat(y_train).get(0, 0)
     n_test_attack,  n_test_normal  = uh.count_stat(y_test).get(1, 0),  uh.count_stat(y_test).get(0, 0)
     n_val_attack,   n_val_normal   = uh.count_stat(y_val).get(1, 0),   uh.count_stat(y_val).get(0, 0)
 
-    # Keep features in the frames (for convenient saving)
     df_train[cols] = X_train; df_val[cols] = X_val; df_test[cols] = X_test
-
-    # Hierarchy & output dirs
-    dataset, goid, attack = ph.infer_hierarchy_from_output_dir(output_dir or "")
-    vis_base = os.path.join(IF_DATA_DIR, dataset, goid, attack)
-    _ensure_dir(vis_base)
-    _ensure_dir(RESULTS_DIR)
-    triplet_root = os.path.join(TRIPLET_DIR, ALGO_NAME, dataset, goid, attack)
 
     all_runs_results = {}
     N_LOOPS = 3
-    num_runs = 1
-    # ==============================================================
-    #                         MAIN LOOP
-    # ==============================================================
+    num_runs = 5
+
+    # ==============================================================================
+    #                     MAIN LOOP (runs)
+    # ==============================================================================
     for i in range(1, num_runs + 1):
         run_key = f"Run_{i}"
-        run_dir = os.path.join(vis_base, run_key)
-        _ensure_dir(run_dir)
+
         try:
-            # ---------------- Fit IF (capturing usage) ----------------
             with ru.ResourceProfiler() as profiler_train:
                 # Loop the training task N_LOOPS times
                 for _ in range(N_LOOPS):
-                    model= run_lr(
-                        X_train=X_val,
-                        y_train=y_val
-                    )
+                    medians, iqrs, thr = run_window_statistical(
+                X_train,window_size=WINDOW_SIZE)
+                    
             avg_train_wall_ns = profiler_train.wall_nanoseconds / N_LOOPS
-            avg_time_pkt_tr = avg_train_wall_ns / len(y_train) if len(y_train) else None
+            avg_time_pkt_tr = avg_train_wall_ns / len(y_train) if len(y_train) else None   
+            
 
-            # ---------------- TEST predict (capturing usage) -----------------
+            # ---------- Test metrics ----------
 
             with ru.ResourceProfiler() as profiler:
                 # Loop the training task N_LOOPS times
-                for _ in range(N_LOOPS):        
-                        y_test_pred, scores = predict(
-                    model, X_test
-                )
+                for _ in range(N_LOOPS):
+                    # y_test_pred, scores = predict_grouped(df_test, X_test, medians, iqrs,thr, window_size=grp_size)
+
+                    y_test_pred, scores = predict_window_fast( X=X_test, medians=medians, iqrs=iqrs,upper_threshold=thr, window_size=WINDOW_SIZE)
+
             avg_test_wall_ns = profiler.wall_nanoseconds / N_LOOPS
             avg_time_pkt_te = avg_test_wall_ns / len(y_test) if len(y_test) else None
 
@@ -195,15 +243,15 @@ def main(train_input_path=None,
                 "tn"                    : int(tn_te),
                 "fp"                    : int(fp_te),
                 "fn"                    : int(fn_te),
-                "Accuracy %"            : uh.r2(rpt_te['accuracy']*100),
-                "Precision_anom %"      : uh.r2(precision_anom_te*100),
-                "Precision %"           : uh.r2(rpt_te["macro avg"]["precision"]*100),
-                "Recall_anom %"         : uh.r2(recall_anom_te*100),
-                "Recall %"              : uh.r2(rpt_te["macro avg"]["recall"]*100),
-                "F1-Score_anom %"       : uh.r2(f1_anom_te*100),
-                "F1-Score %"            : uh.r2(rpt_te["macro avg"]["f1-score"]*100),
-                "BalancedAcc %"         : uh.r2(balanced_acc_te*100),
-                "MCC"                   : uh.r3(mcc_te),
+                "Accuracy %"            : uh.r2(rpt_te['accuracy']*100),   # Overall accuracy
+                "Precision_anom %"      : uh.r2(precision_anom_te*100),    # Precision for anomaly class
+                "Precision %"           : uh.r2(rpt_te["macro avg"]["precision"]*100), # Macro avg precision
+                "Recall_anom %"         : uh.r2(recall_anom_te*100),         # Recall for anomaly class
+                "Recall %"              : uh.r2(rpt_te["macro avg"]["recall"]*100), # Macro avg recall
+                "F1-Score_anom %"       : uh.r2(f1_anom_te*100),          # F1-Score for anomaly class
+                "F1-Score %"            : uh.r2(rpt_te["macro avg"]["f1-score"]*100),   
+                "BalancedAcc %"         : uh.r2(balanced_acc_te*100),      # Balanced accuracy
+                "MCC"                   : uh.r3(mcc_te), # Matthews correlation coefficient
                 "PR-AUC"                : uh.r3(pr_auc*100),
                 "ROC-AUC"               : uh.r3(roc_auc*100),
                 "TotalTime (ms)"        : uh.r3(avg_test_wall_ns / 1_000_000),
@@ -216,19 +264,18 @@ def main(train_input_path=None,
                 "training_peak_ram_mb"  : uh.r3(profiler_train.peak_ram_mb),
                 "training_cpu_avg_pct"  : uh.r3(profiler_train.cpu_avg_machine_pct),
                 "training_cpu_peak_pct" : uh.r3(profiler_train.cpu_peak_machine_pct),
-                "n_train_attack"        : int(n_val_attack),
-                "n_train_normal"        : int(n_val_normal)           
+                "n_train_attack"        : int(n_train_attack),
+                "n_train_normal"        : int(n_train_normal)
             }
             log_run_status(ds, run_key, success=True)
         except Exception as e:
-            print(f"Error during run {i} of {ALGO_NAME}: {e}", file=sys.stderr)
-          
+            # print(f"Error during run {i} of {ALGO_NAME}: {e}", file=sys.stderr)
             test_json = {
-                "Normal count"          : 0,
+                "Normal count"          : 0, 
                 "Attack count"          : 0,
                 "Total"                 : 0,
                 "tp"                    : 0,
-                "tn"                    : 0,
+                "tn"                    : 0, 
                 "fp"                    : 0,
                 "fn"                    : 0,
                 "Accuracy %"            : 0,
@@ -251,19 +298,20 @@ def main(train_input_path=None,
                 "training_cpu_avg_pct"  : 0,
                 "training_cpu_peak_pct" : 0,
                 "n_train_attack"        : 0,
-                "n_train_normal"        : 0    
+                "n_train_normal"        : 0   
             }
             log_run_status(ds, run_key, success=False, e=e)
 
         all_runs_results[run_key] = {
-            "Test":       test_json,
+            "Test":       test_json
         }
-
 
     return all_runs_results
 
 
-# -------------------- local test --------------------
+# ==============================================================================
+# Local test
+# ==============================================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=f"Run {ALGO_NAME} analysis.")
     
@@ -308,19 +356,10 @@ if __name__ == "__main__":
         ds=ds
     )
 
-    output_csv_path = f'{uh.ROOT_OUTPUT_DIR}/aggregated_{ALGO_NAME}_results.csv'
-
-
-    uh.append_results_to_csv(output_csv_path, results, {
-            'dataset': dataset, 'goid': goid, 'attack_type': attack_type
-        })
-
-
     long_csv_path = os.path.join(uh.PLOT_DATA_DIR, f"{ALGO_NAME}_metrics_long.csv")
-    # if os.path.exists(long_csv_path):
-    #     os.remove(long_csv_path)
 
     # metrics_long rows
     rows = uh.extract_plot_rows(results, ALGO_NAME, ds) + uh.extract_average_rows_over_runs(results, ALGO_NAME, ds)
     uh.append_rows_to_long_csv(long_csv_path, rows)
-
+    
+    # print(f"{ALGO_NAME} complete for {args.output_dir}")

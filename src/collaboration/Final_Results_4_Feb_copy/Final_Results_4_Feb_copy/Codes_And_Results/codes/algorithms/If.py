@@ -161,7 +161,7 @@ def main(train_input_path=None,
     _ensure_dir(triplet_root)
 
     all_runs_results = {}
-    N_LOOPS = 1
+    N_LOOPS = 3
     num_runs = 1
     # ==============================================================#
     #                         MAIN LOOP                            #

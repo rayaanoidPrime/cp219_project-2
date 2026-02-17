@@ -149,7 +149,7 @@ def main(train_input_path=None,
 
     dataset, goid, attack = ph.infer_hierarchy_from_output_dir(output_dir or "")
     all_runs_results = {}
-    N_LOOPS = 1
+    N_LOOPS = 3
     num_runs = 1
 
 

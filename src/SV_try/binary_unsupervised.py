@@ -59,7 +59,7 @@ warnings.filterwarnings('ignore')
 DATASET_NAME = 'SV_Dataset'
 GOID = 'NA'
 ATTACK_LIST = ["replay", "injection"]
-NUM_RUNS = 1
+num_runs = 1
 CONTAMINATION = 0.2  # Expected proportion of anomalies in training data
 PREPROCESSED_DIR = str(Path(__file__).parent / 'preprocessed')
 

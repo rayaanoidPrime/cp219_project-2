@@ -1,0 +1,9 @@
+{
+  "total_datasets": 2,
+  "processed": 2,
+  "failed": 0,
+  "protocols": [
+    "MMS",
+    "SV"
+  ]
+}

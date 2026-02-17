@@ -1,31 +1,36 @@
 """
-Split SV.csv and MMS.csv into per-attack-type subfolders (time-series safe).
+Split SV.csv and MMS.csv into train/test (time-series safe, binary labels).
 
-For each dataset and each attack class the output tree is:
+All attack scenario labels are merged into a single binary label:
+  - Normal + Fault → attack=0
+  - All other classes → attack=1
 
-    data/SV_MMS_Data/<dataset>/<attack_class>/
+Strategy (preserves temporal order):
+    1. Binarize: Fault+Normal → 0, everything else → 1.  Drop 'class' column.
+    2. Separate normal (attack==0) and attack (attack==1) segments.  No shuffle.
+    3. Take last NORMAL_TEST_FRAC from normal segment and
+       last ATTACK_TEST_FRAC from attack segment → test/attack_and_normal.csv
+    4. Remove those test rows from the original df.
+    5. From remaining:
+       a) Normal rows only            → train/normal_only.csv
+       b) All remaining rows          → train/attack_and_normal.csv
+
+Output tree:
+    data/SV_MMS_Data/<dataset>/
         test/
-            attack_and_normal.csv      # Normal + this attack type  (attack=0/1)
+            attack_and_normal.csv
         train/
-            normal_only.csv            # Normal rows only           (attack=0)
-            attack_and_normal.csv      # Normal + this attack type  (attack=0/1)
-
-Strategy (preserves temporal order, per attack type):
-    1. Filter the full CSV to only (Normal + one attack class) rows.
-    2. Within each of those two groups, take the last TEST_FRAC as test.
-    3. Concatenate per-group test slices   → test/attack_and_normal.csv
-    4. From per-group train slices:
-       a) Keep only Normal rows            → train/normal_only.csv
-       b) Keep all rows                    → train/attack_and_normal.csv
-    5. Rename 'class' → 'attack', map Normal→0, attack→1.
+            normal_only.csv
+            attack_and_normal.csv
 """
 
 import os
 import pandas as pd
 
 # ── config ──────────────────────────────────────────────────────────────────
-TEST_FRAC = 0.20          # 20 % of each class goes to test
-DATA_DIR  = os.path.dirname(os.path.abspath(__file__))
+NORMAL_TEST_FRAC = 0.20       # last 20 % of normal segment → test
+ATTACK_TEST_FRAC = 0.30       # last 30 % of attack segment → test
+DATA_DIR   = os.path.dirname(os.path.abspath(__file__))
 SV_MMS_DIR = os.path.join(DATA_DIR, "SV_MMS_Data")
 
 DATASETS = {
@@ -37,52 +42,57 @@ NORMAL_LABEL = "Normal"
 CLASS_COL    = "class"
 
 
-def _binarize(df: pd.DataFrame, attack_class: str) -> pd.DataFrame:
-    """Rename 'class' → 'attack' and map Normal→0, attack_class→1."""
+def _binarize(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename 'class' → 'attack': Normal/Fault → 0, everything else → 1."""
     df = df.copy()
+    # Merge Fault into Normal first
+    if "Fault" in df[CLASS_COL].unique():
+        df.loc[df[CLASS_COL] == "Fault", CLASS_COL] = NORMAL_LABEL
+    # Binary mapping
     df["attack"] = (df[CLASS_COL] != NORMAL_LABEL).astype(int)
     df.drop(columns=[CLASS_COL], inplace=True)
     return df
 
 
-def split_one_attack(name: str, df_full: pd.DataFrame, attack_class: str):
-    """Create train/test split for one (dataset, attack_class) pair."""
+def split_dataset(name: str, csv_path: str):
+    print(f"\n{'='*60}")
+    print(f"  Processing: {name}")
+    print(f"{'='*60}")
 
-    # Filter to Normal + this specific attack class
-    mask = df_full[CLASS_COL].isin([NORMAL_LABEL, attack_class])
-    df = df_full[mask].copy()
+    df = pd.read_csv(csv_path)
+    print(f"  Total rows : {len(df)}")
+    print(f"  Class dist : {df[CLASS_COL].value_counts().to_dict()}")
 
-    print(f"\n  Attack type: {attack_class}")
-    print(f"    Filtered rows : {len(df)}")
-    print(f"    Class dist    : {df[CLASS_COL].value_counts().to_dict()}")
+    # Step 1 – binarize (Fault+Normal → 0, attacks → 1)
+    df = _binarize(df)
+    n_normal = int((df["attack"] == 0).sum())
+    n_attack = int((df["attack"] == 1).sum())
+    print(f"  After binarize: Normal(0)={n_normal:,}  Attack(1)={n_attack:,}")
 
-    train_parts = []
-    test_parts  = []
+    # Step 2 – separate segments (preserve original order)
+    normal_segment = df[df["attack"] == 0].copy()
+    attack_segment = df[df["attack"] == 1].copy()
 
-    # For each class (Normal / attack_class), do a sequential split
-    for cls in [NORMAL_LABEL, attack_class]:
-        cls_df = df[df[CLASS_COL] == cls].copy()
-        n      = len(cls_df)
-        n_test = max(1, int(n * TEST_FRAC))
-        n_train = n - n_test
+    # Step 3 – sample test from the END of each segment
+    n_normal_test = max(1, int(len(normal_segment) * NORMAL_TEST_FRAC))
+    n_attack_test = max(1, int(len(attack_segment) * ATTACK_TEST_FRAC))
 
-        train_parts.append(cls_df.iloc[:n_train])
-        test_parts.append(cls_df.iloc[n_train:])
+    normal_test  = normal_segment.iloc[-n_normal_test:]
+    normal_train = normal_segment.iloc[:-n_normal_test]
 
-        print(f"      {cls:20s}  train={n_train:>6,}  test={n_test:>6,}")
+    attack_test  = attack_segment.iloc[-n_attack_test:]
+    attack_train = attack_segment.iloc[:-n_attack_test]
 
-    # Assemble splits
-    df_train_all    = pd.concat(train_parts, ignore_index=True)
-    df_test         = pd.concat(test_parts,  ignore_index=True)
-    df_train_normal = df_train_all[df_train_all[CLASS_COL] == NORMAL_LABEL].copy()
+    print(f"  Normal split: train={len(normal_train):,}  test={n_normal_test:,}")
+    print(f"  Attack split: train={len(attack_train):,}  test={n_attack_test:,}")
 
-    # Binarize: class → attack (0/1)
-    df_train_all    = _binarize(df_train_all, attack_class)
-    df_test         = _binarize(df_test, attack_class)
-    df_train_normal = _binarize(df_train_normal, attack_class)
+    # Step 4 – assemble splits
+    df_test         = pd.concat([normal_test, attack_test], ignore_index=True)
+    df_train_all    = pd.concat([normal_train, attack_train], ignore_index=True)
+    df_train_normal = normal_train.copy().reset_index(drop=True)
 
-    # ── write out ────────────────────────────────────────────────────────
-    out_root  = os.path.join(SV_MMS_DIR, name, attack_class)
+    # Step 5 – write out (flat structure, no attack-type subfolders)
+    out_root  = os.path.join(SV_MMS_DIR, name)
     test_dir  = os.path.join(out_root, "test")
     train_dir = os.path.join(out_root, "train")
     os.makedirs(test_dir,  exist_ok=True)
@@ -96,27 +106,10 @@ def split_one_attack(name: str, df_full: pd.DataFrame, attack_class: str):
     df_train_normal.to_csv(train_normal_path, index=False)
     df_train_all.to_csv(train_mixed_path,     index=False)
 
-    print(f"    Written to: {out_root}")
-    print(f"      test/attack_and_normal.csv   → {len(df_test):>6,} rows")
-    print(f"      train/normal_only.csv        → {len(df_train_normal):>6,} rows")
-    print(f"      train/attack_and_normal.csv  → {len(df_train_all):>6,} rows")
-
-
-def split_dataset(name: str, csv_path: str):
-    print(f"\n{'='*60}")
-    print(f"  Processing: {name}")
-    print(f"{'='*60}")
-
-    df = pd.read_csv(csv_path)
-    print(f"  Total rows : {len(df)}")
-    print(f"  Class dist : {df[CLASS_COL].value_counts().to_dict()}")
-
-    # Get all non-Normal attack classes
-    attack_classes = [c for c in df[CLASS_COL].unique() if c != NORMAL_LABEL]
-    print(f"  Attack types: {attack_classes}")
-
-    for attack_class in sorted(attack_classes):
-        split_one_attack(name, df, attack_class)
+    print(f"  Written to: {out_root}")
+    print(f"    test/attack_and_normal.csv   → {len(df_test):>6,} rows")
+    print(f"    train/normal_only.csv        → {len(df_train_normal):>6,} rows")
+    print(f"    train/attack_and_normal.csv  → {len(df_train_all):>6,} rows")
 
 
 if __name__ == "__main__":

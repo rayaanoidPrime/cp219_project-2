@@ -214,7 +214,7 @@ def main(train_input_path=None,
     os.makedirs(triplet_root, exist_ok=True)
 
     all_runs_results = {}
-    N_LOOPS = 1
+    N_LOOPS = 3
     num_runs = 1
 
     # ==============================================================

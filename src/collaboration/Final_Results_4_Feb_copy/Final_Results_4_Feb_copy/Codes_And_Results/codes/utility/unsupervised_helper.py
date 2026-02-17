@@ -69,6 +69,7 @@ LOG_DIR = 'c:/Users/Rayaan_Ghosh/Desktop/OSS/cp219_project-2/src/collaboration/F
 
 
 
+os.makedirs(ROOT_OUTPUT_DIR, exist_ok=True)
 os.makedirs(PLOT_DATA_DIR, exist_ok=True)
 os.makedirs(PLOTS_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -220,12 +221,15 @@ def get_trainable_data(
     X_val, y_val, df_clean_val = None, None, None
     X_test, y_test, df_clean_test = None, None, None
     feat_cols = None
+
+    # Determine feature columns from TRAINING data first, then reuse for val/test.
+    # This prevents zero-variance filtering from selecting different columns per split.
     if(df_train is not None):
         X_train, y_train ,feat_cols, df_clean_train=get_clean_data_from_dataframe(df_train, use_features=use_features, use_freq=use_freq)
     if(df_val is not None):
-        X_val, y_val ,feat_cols, df_clean_val= get_clean_data_from_dataframe(df_val,use_features=use_features, use_freq=use_freq)
+        X_val, y_val ,_, df_clean_val= get_clean_data_from_dataframe(df_val,use_features=use_features, use_freq=use_freq, forced_feat_cols=feat_cols)
     if(df_test is not None):
-        X_test, y_test ,feat_cols, df_clean_test= get_clean_data_from_dataframe(df_test,use_features=use_features, use_freq=use_freq)
+        X_test, y_test ,_, df_clean_test= get_clean_data_from_dataframe(df_test,use_features=use_features, use_freq=use_freq, forced_feat_cols=feat_cols)
     
     # Scaling
     if scaler is not None:
@@ -241,8 +245,13 @@ def get_trainable_data(
 
     return X_train, X_val, X_test, y_train, y_val, y_test, df_clean_train, df_clean_val, df_clean_test, feat_cols
 
-def get_clean_data_from_dataframe(df: pd.DataFrame, use_freq=False, use_features='all'):
-    """Return (X, y) with X as float64 and y as int, dropping any rows with NaNs."""
+def get_clean_data_from_dataframe(df: pd.DataFrame, use_freq=False, use_features='all', forced_feat_cols=None):
+    """Return (X, y) with X as float64 and y as int, dropping any rows with NaNs.
+    
+    If forced_feat_cols is provided, use those columns directly instead of
+    performing feature selection. This ensures val/test use the same features
+    as training data.
+    """
     
     
     # df = df.drop(columns='time_from_start')
@@ -250,37 +259,41 @@ def get_clean_data_from_dataframe(df: pd.DataFrame, use_freq=False, use_features
     # Get only numeric columns
     df_clean = _sanitize_to_numeric(df)
 
-    # numeric feature columns
-    feat_cols = df_clean.select_dtypes(include=[np.number]).columns.tolist()
-    if LABEL_COL in feat_cols:
-        feat_cols.remove(LABEL_COL)
-    
-    if 'index' in feat_cols:
-        feat_cols.remove('index')
+    if forced_feat_cols is not None:
+        # Use the feature columns determined from training data
+        feat_cols = forced_feat_cols
+    else:
+        # numeric feature columns
+        feat_cols = df_clean.select_dtypes(include=[np.number]).columns.tolist()
+        if LABEL_COL in feat_cols:
+            feat_cols.remove(LABEL_COL)
+        
+        if 'index' in feat_cols:
+            feat_cols.remove('index')
 
-    if use_features=='derived':
-        feat_cols=get_only_derived_features(feat_cols)
+        if use_features=='derived':
+            feat_cols=get_only_derived_features(feat_cols)
 
-    elif use_features=='selected_1':
-        feat_cols=get_selected_features(feat_cols)
+        elif use_features=='selected_1':
+            feat_cols=get_selected_features(feat_cols)
 
-    elif use_features=='selected_2':
-        feat_cols=get_selected_small(feat_cols)
+        elif use_features=='selected_2':
+            feat_cols=get_selected_small(feat_cols)
 
-    elif use_features=='selected_3':
-        feat_cols=get_selected_3(feat_cols)
-    
-    elif use_features=='selected_4':
-        feat_cols=get_selected_4(feat_cols)
+        elif use_features=='selected_3':
+            feat_cols=get_selected_3(feat_cols)
+        
+        elif use_features=='selected_4':
+            feat_cols=get_selected_4(feat_cols)
 
-    elif use_features=='original':
-        feat_cols=get_original_features(feat_cols)
+        elif use_features=='original':
+            feat_cols=get_original_features(feat_cols, df=df_clean)
 
-    if use_freq:
-        feat_cols.append('freq')
+        if use_freq:
+            feat_cols.append('freq')
 
-    # Remove columns that are entirely NaN (e.g. string columns coerced to numeric)
-    feat_cols = [c for c in feat_cols if df_clean[c].notna().any()]
+        # Remove columns that are entirely NaN (e.g. string columns coerced to numeric)
+        feat_cols = [c for c in feat_cols if df_clean[c].notna().any()]
 
     # Else Feature columns will include all feature columns
     
@@ -375,7 +388,7 @@ def get_selected_3(feat_columns):
     'numDatSetEntries', 'time_diff', 'stNum_diff','sqNum_diff']
     return selected_columns
 
-def get_original_features(feat_columns):
+def get_original_features(feat_columns, df=None):
     # ''' Include: 'Length', 'stNum', 'sqNum', 'timeAllowedtoLive', 'numDatSetEntries', 'time_from_start'
     #                 Any bitstring_i+, floatvalue_i+, or boolean/int-like features
     #     Exclude: all _diff or timestamp_diff, time_diff, etc.
@@ -405,17 +418,17 @@ def get_original_features(feat_columns):
     # 2. Check for SV columns (heuristic: sv.svID or similar)
     #    Look for any 'sv.' column
     if any(c.startswith('sv.') for c in feat_columns):
-        return get_sv_features(feat_columns)
+        return get_sv_features(feat_columns, df)
 
     # 3. Check for MMS columns (heuristic: mms.id or similar)
     if any(c.startswith('mms.') for c in feat_columns):
-        return get_mms_features(feat_columns)
+        return get_mms_features(feat_columns, df)
 
     # 4. Fallback: return everything (already filtered for NaNs in loading)
     return feat_columns
 
 
-def get_sv_features(feat_columns):
+def get_sv_features(feat_columns, df=None):
     """
     Select features for SV dataset.
     Includes:
@@ -427,6 +440,8 @@ def get_sv_features(feat_columns):
     Excludes:
       - *_resolved
       - *.oui
+      - sv.svID (ID column)
+      - Zero variance columns (if df is provided)
     """
     selected = []
     for c in feat_columns:
@@ -435,6 +450,7 @@ def get_sv_features(feat_columns):
         if c.endswith('.oui'): continue
         if c == 'class': continue
         if c == 'attack': continue  # Label
+        if c == 'sv.svID': continue # Exclude ID
 
         # Inclusions
         if c.startswith('eth.'):
@@ -444,10 +460,26 @@ def get_sv_features(feat_columns):
         elif c in ['frame_length', 'highest_layer', 'timestamp', 'timestamp_delta']:
             selected.append(c)
     
+    # Filter out zero-variance columns if df is provided
+    if df is not None and len(selected) > 0:
+        # Ensure selected columns exist in df
+        valid_cols = [c for c in selected if c in df.columns]
+        if not valid_cols:
+            return selected # Should probably return empty or original logic if mismatch
+        
+        # Calculate variance
+        numeric_df = df[valid_cols].select_dtypes(include=[np.number])
+        if not numeric_df.empty:
+            variances = numeric_df.var()
+            low_variance_cols = variances[variances == 0].index.tolist()
+            if low_variance_cols:
+                # print(f"  [SV] Dropping {len(low_variance_cols)} zero-variance columns: {low_variance_cols}")
+                selected = [c for c in selected if c not in low_variance_cols]
+
     return selected
 
 
-def get_mms_features(feat_columns):
+def get_mms_features(feat_columns, df=None):
     """
     Select features for MMS dataset.
     Includes:
@@ -459,6 +491,8 @@ def get_mms_features(feat_columns):
     Excludes:
       - *_resolved
       - *.oui
+      - mms.id (ID column)
+      - Zero variance columns (if df is provided)
     """
     selected = []
     for c in feat_columns:
@@ -467,6 +501,7 @@ def get_mms_features(feat_columns):
         if c.endswith('.oui'): continue
         if c == 'class': continue
         if c == 'attack': continue # Label
+        if c == 'mms.id': continue # Exclude ID
 
         # Inclusions
         if c.startswith('eth.'): selected.append(c)
@@ -479,6 +514,20 @@ def get_mms_features(feat_columns):
         elif c.startswith('mms.'): selected.append(c)
         elif c in ['timestamp', 'timestamp_delta']:
             selected.append(c)
+
+    # Filter out zero-variance columns if df is provided
+    if df is not None and len(selected) > 0:
+        valid_cols = [c for c in selected if c in df.columns]
+        if not valid_cols:
+            return selected
+            
+        numeric_df = df[valid_cols].select_dtypes(include=[np.number])
+        if not numeric_df.empty:
+            variances = numeric_df.var()
+            low_variance_cols = variances[variances == 0].index.tolist()
+            if low_variance_cols:
+                # print(f"  [MMS] Dropping {len(low_variance_cols)} zero-variance columns: {low_variance_cols}")
+                selected = [c for c in selected if c not in low_variance_cols]
 
     return selected
 
